@@ -1,0 +1,22 @@
+{
+  "ega": {
+    "slurm_encryption": {
+      "pattern": "*.fastq.gz",
+      "task_layout": "sample",
+      "items_per_task": 1,
+      "job_name": "localega_encrypt",
+      "partition": "middle_idx",
+      "account": null,
+      "chdir": null,
+      "ntasks": 1,
+      "cpus_per_task": 2,
+      "mem": "8G",
+      "time_limit": "24:00:00",
+      "setup_commands": [],
+      "no_checksums": false,
+      "generate_plots": false,
+      "force": false,
+      "fail_fast": true
+    }
+  }
+}

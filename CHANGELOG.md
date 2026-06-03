@@ -8,9 +8,11 @@ where possible.
 
 ## [Unreleased]
 
-### Notes
+### Added
 
-- Pending changes for the next release will be listed here.
+- Added SLURM encryption execution support to generate chunk files, task
+  manifests, reusable `sbatch` array scripts and optional job submission for
+  large Affiliated EGA encryption batches.
 
 ## [0.1.0] - 2026-05-21
 
