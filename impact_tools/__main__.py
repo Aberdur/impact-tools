@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from importlib import resources
 from pathlib import Path
 
 import click
@@ -12,11 +14,35 @@ from rich.traceback import install as install_rich_traceback
 
 from impact_tools import __version__
 from impact_tools.ega.encrypt import EncryptionConfig, run_encryption
+from impact_tools.ega.slurm import (
+    SlurmEncryptionPlanConfig,
+    submit_slurm_job,
+    write_slurm_encryption_plan,
+)
 from impact_tools.ega.upload_inbox import InboxUploadConfig, run_inbox_upload
 from impact_tools.beacon import liftover as beacon_liftover
 from impact_tools.beacon import pgx as beacon_pgx
 
 log = logging.getLogger(__name__)
+
+
+def load_configuration(config_file: Path | None = None) -> dict:
+    """Load the default package configuration, optionally overridden by a file."""
+    if config_file is None:
+        with resources.files("impact_tools").joinpath("conf/configuration.json").open(
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            return json.load(handle)
+    with config_file.expanduser().open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def slurm_config_value(slurm_conf: dict, key: str, override, default=None):
+    """Return CLI override when present, otherwise the configured value."""
+    if override is not None:
+        return override
+    return slurm_conf.get(key, default)
 
 
 def configure_logging(verbose: bool, log_file: Path | None) -> None:
@@ -771,6 +797,215 @@ def pgx_cmd(
             f"pgx pipeline finished with {pipeline_result.failed} failed step(s). "
             "Check logs in <base-dir>/logs/ for details."
         )
+@ega.command("encrypt-slurm")
+@click.option(
+    "--config-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help=(
+        "JSON configuration file. Defaults to impact_tools/conf/configuration.json."
+    ),
+)
+@click.option(
+    "-i",
+    "--input-dir",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    required=True,
+    help=(
+        "Directory containing raw files. Also used as the base directory for "
+        "relative paths in --input-list."
+    ),
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Directory where encrypted .c4gh files will be written by SLURM jobs.",
+)
+@click.option(
+    "--plan-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Directory where SLURM chunks, manifests and sbatch file are written.",
+)
+@click.option(
+    "-k",
+    "--recipient-pubkey",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Crypt4GH recipient public key, usually LocalEGA service.key.pub.",
+)
+@click.option(
+    "--crypt4gh-bin",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="crypt4gh executable to use inside each SLURM task.",
+)
+@click.option(
+    "--input-list",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help=(
+        "Optional text file with one input file path per line. Relative paths "
+        "are resolved from input-dir."
+    ),
+)
+@click.option(
+    "--pattern",
+    help="Input file glob pattern. Defaults to configuration value.",
+)
+@click.option(
+    "--task-layout",
+    type=click.Choice(["sample", "file"]),
+    help="Create SLURM tasks by sample directory or by individual file.",
+)
+@click.option(
+    "--items-per-task",
+    type=int,
+    help="Number of samples or files grouped into each SLURM array task.",
+)
+@click.option("--job-name", help="SLURM job name.")
+@click.option(
+    "--partition",
+    help="SLURM partition to include in the sbatch file.",
+)
+@click.option("--account", help="SLURM account to include in the sbatch file.")
+@click.option(
+    "--chdir",
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Working directory for the SLURM job. Written as #SBATCH --chdir.",
+)
+@click.option("--ntasks", type=int, help="SLURM ntasks value.")
+@click.option("--cpus-per-task", type=int, help="SLURM CPUs per task.")
+@click.option("--mem", help="SLURM memory request.")
+@click.option(
+    "--time-limit",
+    help="SLURM time limit.",
+)
+@click.option(
+    "--setup-command",
+    multiple=True,
+    help=(
+        "Command inserted before encryption in the sbatch file. Can be used "
+        "multiple times to load modules or activate environments."
+    ),
+)
+@click.option(
+    "--no-checksums",
+    is_flag=True,
+    help="Pass --no-checksums to each encryption task.",
+)
+@click.option(
+    "--with-plots",
+    is_flag=True,
+    help="Allow each encryption task to generate plots.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Pass --force to each encryption task.",
+)
+@click.option(
+    "--continue-on-error",
+    is_flag=True,
+    help="Do not pass --fail-fast to each encryption task.",
+)
+@click.option(
+    "--submit",
+    is_flag=True,
+    help="Submit the generated sbatch file with sbatch.",
+)
+def encrypt_slurm_cmd(
+    config_file: Path | None,
+    input_dir: Path,
+    output_dir: Path | None,
+    plan_dir: Path | None,
+    recipient_pubkey: Path,
+    crypt4gh_bin: Path | None,
+    input_list: Path | None,
+    pattern: str,
+    task_layout: str,
+    items_per_task: int,
+    job_name: str,
+    partition: str | None,
+    account: str | None,
+    chdir: Path | None,
+    ntasks: int,
+    cpus_per_task: int,
+    mem: str,
+    time_limit: str,
+    setup_command: tuple[str, ...],
+    no_checksums: bool,
+    with_plots: bool,
+    force: bool,
+    continue_on_error: bool,
+    submit: bool,
+) -> None:
+    """Generate and optionally submit SLURM array jobs for Crypt4GH encryption."""
+    configuration = load_configuration(config_file)
+    slurm_conf = configuration.get("ega", {}).get("slurm_encryption", {})
+    configured_chdir = slurm_config_value(slurm_conf, "chdir", chdir)
+    if isinstance(configured_chdir, str):
+        configured_chdir = Path(configured_chdir)
+    configured_setup_commands = (
+        setup_command
+        if setup_command
+        else tuple(slurm_conf.get("setup_commands") or ())
+    )
+    configured_fail_fast = bool(slurm_conf.get("fail_fast", True))
+    if continue_on_error:
+        configured_fail_fast = False
+
+    config = SlurmEncryptionPlanConfig(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        plan_dir=plan_dir,
+        recipient_pubkey=recipient_pubkey,
+        crypt4gh_bin=crypt4gh_bin,
+        input_list=input_list,
+        pattern=slurm_config_value(slurm_conf, "pattern", pattern, "*.fastq.gz"),
+        task_layout=slurm_config_value(slurm_conf, "task_layout", task_layout, "sample"),
+        items_per_task=int(
+            slurm_config_value(slurm_conf, "items_per_task", items_per_task, 1)
+        ),
+        job_name=slurm_config_value(slurm_conf, "job_name", job_name, "localega_encrypt"),
+        partition=slurm_config_value(slurm_conf, "partition", partition, "middle_idx"),
+        account=slurm_config_value(slurm_conf, "account", account),
+        chdir=configured_chdir,
+        ntasks=int(slurm_config_value(slurm_conf, "ntasks", ntasks, 1)),
+        cpus_per_task=int(slurm_config_value(slurm_conf, "cpus_per_task", cpus_per_task, 2)),
+        mem=slurm_config_value(slurm_conf, "mem", mem, "8G"),
+        time_limit=slurm_config_value(slurm_conf, "time_limit", time_limit, "24:00:00"),
+        setup_commands=configured_setup_commands,
+        no_checksums=no_checksums or bool(slurm_conf.get("no_checksums", False)),
+        no_plots=not (with_plots or bool(slurm_conf.get("generate_plots", False))),
+        force=force or bool(slurm_conf.get("force", False)),
+        fail_fast=configured_fail_fast,
+    )
+    try:
+        result = write_slurm_encryption_plan(config)
+        if submit:
+            result = submit_slurm_job(result)
+    except Exception as exc:  # noqa: BLE001 - CLI boundary converts to clean error
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Plan directory : {result.plan_dir}")
+    click.echo(f"Tasks          : {result.task_count}")
+    click.echo(f"Files          : {result.file_count}")
+    click.echo(f"Total GiB      : {result.total_size_bytes / (1024**3):.3f}")
+    click.echo(f"Task plan      : {result.task_plan_file}")
+    click.echo(f"File plan      : {result.file_plan_file}")
+    click.echo(f"Chunk index    : {result.chunk_index_file}")
+    click.echo(f"SBATCH file    : {result.sbatch_file}")
+    click.echo(f"Run helper     : {result.run_file}")
+    if submit:
+        if result.submitted:
+            click.echo(f"Submitted      : {result.submit_stdout}")
+        else:
+            raise click.ClickException(
+                f"sbatch submission failed: {result.submit_stderr or result.submit_stdout}"
+            )
+    else:
+        click.echo(f"Submit with    : bash {result.run_file}")
+
+
+ega.add_command(encrypt_slurm_cmd, "plan-encryption-slurm")
 
 
 def main() -> None:

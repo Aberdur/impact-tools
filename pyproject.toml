@@ -30,3 +30,4 @@ zip-safe = false
 
 [tool.setuptools.package-data]
 "impact_tools.beacon.resources" = ["Snakefile"]
+impact_tools = ["conf/*.json"]

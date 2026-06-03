@@ -21,10 +21,13 @@ impact-tools/
 │   │   └── pgx.py               # pgx_pilot workspace preparation and execution
 │   └── ega/
 │       ├── encrypt.py           # Crypt4GH encryption workflow
+│       ├── slurm.py             # HPC/SLURM encryption planning
 │       └── upload_inbox.py      # LocalEGA Inbox SFTP upload workflow
 ├── docs/
 │   ├── beacon/                  # Beacon workflow notes
 │   └── ega/                     # Affiliated EGA workflow notes
+├── impact_tools/conf/
+│   └── configuration.json       # Default operational settings
 ├── environment.yml              # Conda/micromamba development environment
 └── pyproject.toml               # Python package metadata
 ```
@@ -215,8 +218,9 @@ Current focus:
 
 1. Encrypt raw sequencing files with Crypt4GH.
 2. Generate auditable metrics for encryption runs.
-3. Upload encrypted `.c4gh` files to the LocalEGA Inbox over SFTP.
-4. Generate upload metrics and manifests for traceability.
+3. Plan HPC/SLURM array jobs for large encryption batches.
+4. Upload encrypted `.c4gh` files to the LocalEGA Inbox over SFTP.
+5. Generate upload metrics and manifests for traceability.
 
 ### Workflow Overview
 
@@ -308,6 +312,54 @@ Each encryption run writes a complete audit bundle:
 | `encryption_<run_id>.log` | Detailed execution log. |
 | `plots_<run_id>/` | Optional PNG plots when `matplotlib` is installed. |
 
+### Run Encryption on SLURM
+
+For large batches stored in a shared filesystem such as `/impact_data`, the CLI
+can generate a SLURM array job without duplicating the encryption logic.
+
+By default, tasks are grouped by sample directory, so paired WGS files under the
+same sample folder are encrypted in the same array task.
+
+```bash
+impact-tools ega encrypt-slurm \
+  --input-dir /impact_data/raw_data/lega \
+  --output-dir /impact_data/raw_data/lega/encrypted_c4gh \
+  --recipient-pubkey /path/to/service.key.pub
+```
+
+SLURM defaults such as partition, CPUs, memory and time limit are read from
+`impact_tools/conf/configuration.json`. Use CLI options only when a particular
+run needs to override those defaults.
+
+If `crypt4gh` is not available in the compute-node `PATH`, add:
+
+```bash
+--crypt4gh-bin /path/to/env/bin/crypt4gh
+```
+
+The generated execution bundle includes:
+
+| File | Content |
+| --- | --- |
+| `chunks/task_<N>.txt` | Input file list consumed by one SLURM array task. |
+| `encryption_slurm_tasks_<run_id>.tsv` | Task-level summary with sample, chunk and size information. |
+| `encryption_slurm_files_<run_id>.tsv` | File-level mapping to each task. |
+| `encryption_slurm_chunks_<run_id>.txt` | Ordered chunk index used by the array script. |
+| `encrypt_localega_array_<run_id>.sbatch` | Reproducible SLURM array script. |
+| `_run_encrypt_localega_array_<run_id>.sh` | Small executable wrapper that submits the sbatch file. |
+
+Submit the generated job with:
+
+```bash
+bash /path/to/plan/_run_encrypt_localega_array_<run_id>.sh
+```
+
+Add `--submit` to submit the generated `sbatch` immediately from the CLI.
+
+Use `--task-layout file` if each file should become its own schedulable unit.
+Use `--setup-command` only when the generated job needs extra environment setup
+lines, for example loading a module on a specific HPC environment.
+
 ### Upload to LocalEGA Inbox
 
 Upload encrypted `.c4gh` files to an Inbox SFTP endpoint:
@@ -396,6 +448,7 @@ python3 -m py_compile \
   impact_tools/beacon/liftover.py \
   impact_tools/beacon/pgx.py \
   impact_tools/ega/encrypt.py \
+  impact_tools/ega/slurm.py \
   impact_tools/ega/upload_inbox.py
 ```
 
@@ -406,5 +459,6 @@ python3 -m impact_tools --help
 python3 -m impact_tools beacon liftover --help
 python3 -m impact_tools beacon pgx --help
 python3 -m impact_tools ega encrypt --help
+python3 -m impact_tools ega encrypt-slurm --help
 python3 -m impact_tools ega upload-inbox --help
 ```
