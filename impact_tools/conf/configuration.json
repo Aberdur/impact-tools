@@ -4,6 +4,7 @@
     "modules_outpath": {}
   },
   "ega": {
+    "registry_file": "~/.impact_tools/ega_registry.sqlite3",
     "encryption": {
       "input_dir": null,
       "output_dir": null,

@@ -59,6 +59,7 @@ class SlurmEncryptionPlanConfig:
     no_plots: bool = True
     force: bool = False
     fail_fast: bool = True
+    registry_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,15 @@ def _write_sbatch(
         command.append("--force")
     if config.fail_fast:
         command.append("--fail-fast")
+    if config.registry_file is not None:
+        command.extend(
+            [
+                "--registry-file",
+                str(config.registry_file.expanduser().resolve()),
+            ]
+        )
+    else:
+        command.append("--no-registry")
 
     safe_command = " \\\n  ".join(
         part if part == '"${CHUNK_FILE}"' else shlex.quote(part) for part in command

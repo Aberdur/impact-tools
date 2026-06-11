@@ -14,6 +14,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from impact_tools.ega.registry import (
+    DEFAULT_REGISTRY_PATH,
+    EgaRegistry,
+    inbox_endpoint,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +63,7 @@ class InboxUploadConfig:
     compute_checksums: bool = True
     fail_fast: bool = False
     connect_timeout: int = 30
+    registry_file: Path | None = DEFAULT_REGISTRY_PATH
 
 
 @dataclass
@@ -126,6 +133,17 @@ def run_inbox_upload(config: InboxUploadConfig) -> InboxUploadResult:
         LOGGER.info("Inbox: %s@%s:%s", config.username, config.host, config.port)
         LOGGER.info("Remote directory: %s", config.remote_dir)
         LOGGER.info("Remote layout: %s", config.remote_layout)
+        LOGGER.info(
+            "Upload registry: %s",
+            config.registry_file.expanduser().resolve()
+            if config.registry_file is not None
+            else "disabled",
+        )
+        if config.registry_file is not None and not config.compute_checksums:
+            LOGGER.warning(
+                "The registry still calculates SHA-256 to identify content; "
+                "--no-checksums only disables optional checksum reporting."
+            )
         if config.input_list is not None:
             LOGGER.info("Input list: %s", config.input_list.expanduser().resolve())
         LOGGER.info("Files discovered: %s", len(files))
@@ -135,13 +153,42 @@ def run_inbox_upload(config: InboxUploadConfig) -> InboxUploadResult:
             for local_file in files:
                 metrics.append(_dry_run_metric(run_id, local_file, input_dir, config))
         else:
-            with _open_sftp(config) as sftp:
-                for local_file in files:
-                    metric = _upload_file(run_id, local_file, input_dir, config, sftp)
-                    metrics.append(metric)
-                    if metric.status == "failed" and config.fail_fast:
-                        LOGGER.error("Stopping after first failure because --fail-fast is set")
-                        break
+            registry = (
+                EgaRegistry(config.registry_file)
+                if config.registry_file is not None
+                else None
+            )
+            try:
+                pending, registered_metrics = _partition_registered_uploads(
+                    run_id=run_id,
+                    files=files,
+                    input_dir=input_dir,
+                    config=config,
+                    registry=registry,
+                )
+                metrics.extend(registered_metrics)
+                if pending:
+                    with _open_sftp(config) as sftp:
+                        for local_file, sha256_local in pending:
+                            metric = _upload_file(
+                                run_id,
+                                local_file,
+                                input_dir,
+                                config,
+                                sftp,
+                                sha256_local,
+                                registry,
+                            )
+                            metrics.append(metric)
+                            if metric.status == "failed" and config.fail_fast:
+                                LOGGER.error(
+                                    "Stopping after first failure because "
+                                    "--fail-fast is set"
+                                )
+                                break
+            finally:
+                if registry is not None:
+                    registry.close()
 
         metrics_file = output_dir / f"inbox_upload_metrics_{run_id}.tsv"
         summary_file = output_dir / f"inbox_upload_summary_{run_id}.txt"
@@ -359,12 +406,161 @@ def _dry_run_metric(
     )
 
 
+def _partition_registered_uploads(
+    *,
+    run_id: str,
+    files: list[Path],
+    input_dir: Path,
+    config: InboxUploadConfig,
+    registry: EgaRegistry | None,
+) -> tuple[list[tuple[Path, str]], list[UploadMetric]]:
+    pending: list[tuple[Path, str]] = []
+    skipped: list[UploadMetric] = []
+    seen_hashes: dict[str, Path] = {}
+    endpoint = inbox_endpoint(config.host, config.port, config.username)
+    hash_required = registry is not None or config.compute_checksums
+    for local_file in files:
+        sha256_local = _sha256(local_file) if hash_required else ""
+        if sha256_local and sha256_local in seen_hashes and not config.force:
+            remote_path = _remote_path(local_file, input_dir, config)
+            LOGGER.warning(
+                "Skipping duplicate content in current batch: %s "
+                "(same content as %s)",
+                local_file,
+                seen_hashes[sha256_local],
+            )
+            skipped.append(
+                _metric(
+                    run_id=run_id,
+                    local_file=local_file,
+                    input_dir=input_dir,
+                    remote_path=remote_path,
+                    size=local_file.stat().st_size,
+                    seconds=0,
+                    throughput=None,
+                    sha256_local=(
+                        sha256_local if config.compute_checksums else ""
+                    ),
+                    status="skipped_duplicate_batch",
+                    error="",
+                )
+            )
+            continue
+        if sha256_local:
+            seen_hashes[sha256_local] = local_file
+        record = (
+            registry.find_upload(sha256_local, endpoint)
+            if registry is not None and not config.force
+            else None
+        )
+        if record is None:
+            pending.append((local_file, sha256_local))
+            continue
+
+        remote_path = _remote_path(local_file, input_dir, config)
+        LOGGER.warning(
+            "Skipping content already uploaded to %s in run %s: %s "
+            "(previous remote path: %s)",
+            endpoint,
+            record.run_id,
+            local_file,
+            record.remote_path,
+        )
+        skipped.append(
+            _metric(
+                run_id=run_id,
+                local_file=local_file,
+                input_dir=input_dir,
+                remote_path=remote_path,
+                size=local_file.stat().st_size,
+                seconds=0,
+                throughput=None,
+                sha256_local=sha256_local if config.compute_checksums else "",
+                status="skipped_registered",
+                error="",
+            )
+        )
+    return pending, skipped
+
+
 def _upload_file(
     run_id: str,
     local_file: Path,
     input_dir: Path,
     config: InboxUploadConfig,
     sftp,
+    sha256_local: str,
+    registry: EgaRegistry | None,
+) -> UploadMetric:
+    endpoint = inbox_endpoint(config.host, config.port, config.username)
+    claim_key = f"{sha256_local}:{endpoint}" if registry is not None else ""
+    claim_owner = (
+        registry.try_claim("uploaded", claim_key)
+        if registry is not None
+        else None
+    )
+    if registry is not None and claim_owner is None:
+        remote_path = _remote_path(local_file, input_dir, config)
+        LOGGER.warning("Skipping content currently being uploaded: %s", local_file)
+        return _metric(
+            run_id=run_id,
+            local_file=local_file,
+            input_dir=input_dir,
+            remote_path=remote_path,
+            size=local_file.stat().st_size,
+            seconds=0,
+            throughput=None,
+            sha256_local=sha256_local if config.compute_checksums else "",
+            status="skipped_in_progress",
+            error="",
+        )
+
+    try:
+        if registry is not None and not config.force:
+            record = registry.find_upload(sha256_local, endpoint)
+            if record is not None:
+                remote_path = _remote_path(local_file, input_dir, config)
+                LOGGER.warning(
+                    "Skipping content uploaded by another process in run %s: %s",
+                    record.run_id,
+                    local_file,
+                )
+                return _metric(
+                    run_id=run_id,
+                    local_file=local_file,
+                    input_dir=input_dir,
+                    remote_path=remote_path,
+                    size=local_file.stat().st_size,
+                    seconds=0,
+                    throughput=None,
+                    sha256_local=(
+                        sha256_local if config.compute_checksums else ""
+                    ),
+                    status="skipped_registered",
+                    error="",
+                )
+        return _upload_file_claimed(
+            run_id,
+            local_file,
+            input_dir,
+            config,
+            sftp,
+            sha256_local,
+            registry,
+        )
+    finally:
+        if registry is not None and claim_owner is not None:
+            registry.release_claim("uploaded", claim_key, claim_owner)
+
+
+def _upload_file_claimed(
+    run_id: str,
+    local_file: Path,
+    input_dir: Path,
+    config: InboxUploadConfig,
+    sftp,
+    sha256_local: str,
+    registry: EgaRegistry | None,
 ) -> UploadMetric:
     remote_path = _remote_path(local_file, input_dir, config)
     size = local_file.stat().st_size
@@ -380,7 +576,7 @@ def _upload_file(
                 size=size,
                 seconds=0,
                 throughput=None,
-                sha256_local=_sha256(local_file) if config.compute_checksums else "",
+                sha256_local=sha256_local if config.compute_checksums else "",
                 status="skipped_existing",
                 error="",
             )
@@ -395,6 +591,15 @@ def _upload_file(
             seconds,
             "NA" if throughput is None else f"{throughput:.3f}",
         )
+        if registry is not None:
+            registry.record_upload(
+                sha256=sha256_local,
+                endpoint=inbox_endpoint(config.host, config.port, config.username),
+                remote_path=remote_path,
+                local_path=local_file,
+                sample_id=_sample_id_for_file(local_file, input_dir),
+                run_id=run_id,
+            )
         return _metric(
             run_id=run_id,
             local_file=local_file,
@@ -403,7 +608,7 @@ def _upload_file(
             size=size,
             seconds=seconds,
             throughput=throughput,
-            sha256_local=_sha256(local_file) if config.compute_checksums else "",
+            sha256_local=sha256_local if config.compute_checksums else "",
             status="ok",
             error="",
         )
@@ -417,7 +622,7 @@ def _upload_file(
             size=size,
             seconds=0,
             throughput=None,
-            sha256_local=_sha256(local_file) if config.compute_checksums else "",
+            sha256_local=sha256_local if config.compute_checksums else "",
             status="failed",
             error=str(exc),
         )
@@ -532,7 +737,7 @@ def _build_result(
         log_file=log_file,
         discovered=len(metrics),
         uploaded=len(ok_metrics),
-        skipped=sum(metric.status == "skipped_existing" for metric in metrics),
+        skipped=sum(metric.status.startswith("skipped_") for metric in metrics),
         failed=sum(metric.status == "failed" for metric in metrics),
         total_input_bytes=sum(metric.local_size_bytes for metric in metrics),
         total_upload_seconds=sum(metric.upload_seconds for metric in ok_metrics),
@@ -560,6 +765,7 @@ def _write_summary(
         f"Pattern: {config.pattern}",
         f"Dry-run: {config.dry_run}",
         f"Checksums: {config.compute_checksums}",
+        f"Registry: {config.registry_file or 'disabled'}",
         "",
         f"Files discovered: {result.discovered}",
         f"Uploaded OK: {result.uploaded}",
@@ -604,6 +810,11 @@ def _write_manifest(
             "force": config.force,
             "compute_checksums": config.compute_checksums,
             "host_key_policy": config.host_key_policy,
+            "registry_file": (
+                str(config.registry_file.expanduser().resolve())
+                if config.registry_file is not None
+                else None
+            ),
         },
         "summary": {
             "files_discovered": result.discovered,

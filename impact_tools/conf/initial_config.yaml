@@ -25,6 +25,12 @@ logs:
     beacon_pgx: /impact_data/logs/impact-tools/beacon/pgx
 
 ega:
+  # Shared SQLite registry for successful encryption and Inbox upload events.
+  # Content hashes make tracking independent from batch folder organization.
+  # Keep this file on persistent storage with reliable POSIX file locking.
+  # Set to null to disable by default.
+  registry_file: ~/.impact_tools/ega_registry.sqlite3
+
   encryption:
     # Base directory containing the raw files or sample directories to encrypt.
     # It can still be overridden with --input-dir.

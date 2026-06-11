@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from impact_tools.ega.registry import DEFAULT_REGISTRY_PATH, EgaRegistry
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +59,7 @@ class EncryptionConfig:
     compute_checksums: bool = True
     generate_plots: bool = True
     fail_fast: bool = False
+    registry_file: Path | None = DEFAULT_REGISTRY_PATH
 
 
 @dataclass
@@ -137,25 +140,50 @@ def run_encryption(config: EncryptionConfig) -> EncryptionResult:
         LOGGER.info("Output directory: %s", output_dir)
         LOGGER.info("Recipient public key: %s", recipient_pubkey)
         LOGGER.info("Pattern: %s", config.pattern)
+        LOGGER.info(
+            "Processing registry: %s",
+            config.registry_file.expanduser().resolve()
+            if config.registry_file is not None
+            else "disabled",
+        )
+        if config.registry_file is not None and not config.compute_checksums:
+            LOGGER.warning(
+                "The registry still calculates SHA-256 to identify content; "
+                "--no-checksums only disables optional checksum reporting."
+            )
         if config.input_list is not None:
             LOGGER.info("Input list: %s", config.input_list.expanduser().resolve())
         LOGGER.info("Files discovered: %s", len(files))
 
         metrics: list[FileMetric] = []
-        for input_file in files:
-            metric = _process_file(
-                run_id=run_id,
-                input_file=input_file,
-                input_dir=input_dir,
-                output_dir=output_dir,
-                recipient_pubkey=recipient_pubkey,
-                crypt4gh_bin=crypt4gh_bin,
-                config=config,
-            )
-            metrics.append(metric)
-            if metric.status == "failed" and config.fail_fast:
-                LOGGER.error("Stopping after first failure because --fail-fast is set")
-                break
+        registry = (
+            EgaRegistry(config.registry_file)
+            if config.registry_file is not None and not config.dry_run
+            else None
+        )
+        try:
+            recipient_sha256 = _sha256(recipient_pubkey) if registry else ""
+            for input_file in files:
+                metric = _process_file(
+                    run_id=run_id,
+                    input_file=input_file,
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    recipient_pubkey=recipient_pubkey,
+                    recipient_sha256=recipient_sha256,
+                    crypt4gh_bin=crypt4gh_bin,
+                    config=config,
+                    registry=registry,
+                )
+                metrics.append(metric)
+                if metric.status == "failed" and config.fail_fast:
+                    LOGGER.error(
+                        "Stopping after first failure because --fail-fast is set"
+                    )
+                    break
+        finally:
+            if registry is not None:
+                registry.close()
 
         metrics_file = output_dir / f"encryption_metrics_{run_id}.tsv"
         summary_file = output_dir / f"encryption_summary_{run_id}.txt"
@@ -308,8 +336,76 @@ def _process_file(
     input_dir: Path,
     output_dir: Path,
     recipient_pubkey: Path,
+    recipient_sha256: str,
     crypt4gh_bin: str,
     config: EncryptionConfig,
+    registry: EgaRegistry | None,
+) -> FileMetric:
+    if config.dry_run or registry is None:
+        return _process_file_claimed(
+            run_id=run_id,
+            input_file=input_file,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            recipient_pubkey=recipient_pubkey,
+            recipient_sha256=recipient_sha256,
+            crypt4gh_bin=crypt4gh_bin,
+            config=config,
+            registry=registry,
+            source_sha256="",
+        )
+
+    source_sha256 = _sha256(input_file)
+    claim_key = f"{source_sha256}:{recipient_sha256}"
+    claim_owner = registry.try_claim("encrypted", claim_key)
+    if claim_owner is None:
+        sample_id = _sample_id_for_file(input_file, input_dir, config.sample_id)
+        output_file = output_dir / sample_id / f"{input_file.name}.c4gh"
+        input_size = input_file.stat().st_size
+        LOGGER.warning("Skipping content currently being encrypted: %s", input_file)
+        return _metric(
+            run_id=run_id,
+            sample_id=sample_id,
+            input_file=input_file,
+            output_file=output_file,
+            input_size=input_size,
+            output_size=0,
+            seconds=0,
+            throughput=None,
+            sha256_input=source_sha256 if config.compute_checksums else "",
+            sha256_c4gh="",
+            status="skipped_in_progress",
+            error="",
+        )
+
+    try:
+        return _process_file_claimed(
+            run_id=run_id,
+            input_file=input_file,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            recipient_pubkey=recipient_pubkey,
+            recipient_sha256=recipient_sha256,
+            crypt4gh_bin=crypt4gh_bin,
+            config=config,
+            registry=registry,
+            source_sha256=source_sha256,
+        )
+    finally:
+        registry.release_claim("encrypted", claim_key, claim_owner)
+
+
+def _process_file_claimed(
+    run_id: str,
+    input_file: Path,
+    input_dir: Path,
+    output_dir: Path,
+    recipient_pubkey: Path,
+    recipient_sha256: str,
+    crypt4gh_bin: str,
+    config: EncryptionConfig,
+    registry: EgaRegistry | None,
+    source_sha256: str,
 ) -> FileMetric:
     sample_id = _sample_id_for_file(input_file, input_dir, config.sample_id)
     relative_input = input_file.relative_to(input_dir)
@@ -336,9 +432,73 @@ def _process_file(
             error="",
         )
 
+    if registry is not None and not config.force:
+        record = registry.find_encryption(source_sha256, recipient_sha256)
+        if record is not None:
+            registered_output = Path(record.output_path)
+            if (
+                registered_output.is_file()
+                and registered_output.stat().st_size == record.encrypted_size
+                and _sha256(registered_output) == record.encrypted_sha256
+            ):
+                LOGGER.warning(
+                    "Skipping content encrypted in run %s: %s "
+                    "(registered output: %s)",
+                    record.run_id,
+                    input_file,
+                    registered_output,
+                )
+                return _metric(
+                    run_id=run_id,
+                    sample_id=sample_id,
+                    input_file=input_file,
+                    output_file=registered_output,
+                    input_size=input_size,
+                    output_size=record.encrypted_size,
+                    seconds=0,
+                    throughput=None,
+                    sha256_input=(
+                        source_sha256 if config.compute_checksums else ""
+                    ),
+                    sha256_c4gh=(
+                        record.encrypted_sha256 if config.compute_checksums else ""
+                    ),
+                    status="skipped_registered",
+                    error="",
+                )
+            LOGGER.warning(
+                "Registered encrypted output is missing or has changed; "
+                "encrypting again: %s",
+                registered_output,
+            )
+
     if output_file.exists() and not config.force:
         output_size = output_file.stat().st_size
-        sha_input, sha_output = _checksums(input_file, output_file, config.compute_checksums)
+        if registry is not None:
+            message = (
+                "Output already exists but is not registered for this input "
+                f"content and recipient key: {output_file}. Use --force to "
+                "replace it or choose another output directory."
+            )
+            LOGGER.error(message)
+            return _metric(
+                run_id=run_id,
+                sample_id=sample_id,
+                input_file=input_file,
+                output_file=output_file,
+                input_size=input_size,
+                output_size=output_size,
+                seconds=0,
+                throughput=None,
+                sha256_input=(
+                    source_sha256 if config.compute_checksums else ""
+                ),
+                sha256_c4gh="",
+                status="failed",
+                error=message,
+            )
+        hash_required = config.compute_checksums or registry is not None
+        sha_input, sha_output = _checksums(input_file, output_file, hash_required)
         LOGGER.warning("Skipping existing output: %s", output_file)
         return _metric(
             run_id=run_id,
@@ -349,8 +509,8 @@ def _process_file(
             output_size=output_size,
             seconds=0,
             throughput=None,
-            sha256_input=sha_input,
-            sha256_c4gh=sha_output,
+            sha256_input=sha_input if config.compute_checksums else "",
+            sha256_c4gh=sha_output if config.compute_checksums else "",
             status="skipped_existing",
             error="",
         )
@@ -373,7 +533,13 @@ def _process_file(
             output_size=0,
             seconds=seconds,
             throughput=_throughput(input_size, seconds),
-            sha256_input=_sha256(input_file) if config.compute_checksums else "",
+            sha256_input=(
+                source_sha256
+                if config.compute_checksums and source_sha256
+                else _sha256(input_file)
+                if config.compute_checksums
+                else ""
+            ),
             sha256_c4gh="",
             status="failed",
             error=str(exc),
@@ -381,7 +547,26 @@ def _process_file(
 
     seconds = time.perf_counter() - start
     output_size = output_file.stat().st_size
-    sha_input, sha_output = _checksums(input_file, output_file, config.compute_checksums)
+    hash_required = config.compute_checksums or registry is not None
+    sha_input = (
+        source_sha256
+        if source_sha256
+        else _sha256(input_file)
+        if hash_required
+        else ""
+    )
+    sha_output = _sha256(output_file) if hash_required else ""
+    if registry is not None:
+        registry.record_encryption(
+            source_sha256=sha_input,
+            recipient_sha256=recipient_sha256,
+            encrypted_sha256=sha_output,
+            encrypted_size=output_size,
+            input_path=input_file,
+            output_path=output_file,
+            sample_id=sample_id,
+            run_id=run_id,
+        )
     throughput = _throughput(input_size, seconds)
     LOGGER.info(
         "Encrypted %s in %.3fs at %s MiB/s",
@@ -398,8 +583,8 @@ def _process_file(
         output_size=output_size,
         seconds=seconds,
         throughput=throughput,
-        sha256_input=sha_input,
-        sha256_c4gh=sha_output,
+        sha256_input=sha_input if config.compute_checksums else "",
+        sha256_c4gh=sha_output if config.compute_checksums else "",
         status="ok",
         error="",
     )
@@ -518,7 +703,9 @@ def _build_result(
 ) -> EncryptionResult:
     ok_metrics = [metric for metric in metrics if metric.status == "ok"]
     output_metrics = [
-        metric for metric in metrics if metric.status in {"ok", "skipped_existing"}
+        metric
+        for metric in metrics
+        if metric.status in {"ok", "skipped_existing", "skipped_registered"}
     ]
     return EncryptionResult(
         run_id=run_id,
@@ -530,7 +717,7 @@ def _build_result(
         plots_dir=plots_dir,
         discovered=len(metrics),
         encrypted=len(ok_metrics),
-        skipped=sum(metric.status == "skipped_existing" for metric in metrics),
+        skipped=sum(metric.status.startswith("skipped_") for metric in metrics),
         failed=sum(metric.status == "failed" for metric in metrics),
         total_input_bytes=sum(metric.input_size_bytes for metric in metrics),
         total_output_bytes=sum(metric.output_size_bytes for metric in output_metrics),
@@ -569,6 +756,7 @@ def _write_summary(
         f"Input list: {config.input_list.expanduser().resolve() if config.input_list else 'NA'}",
         f"Dry-run: {config.dry_run}",
         f"Checksums: {config.compute_checksums}",
+        f"Registry: {config.registry_file or 'disabled'}",
         "",
         f"Files discovered: {result.discovered}",
         f"Encrypted OK: {result.encrypted}",
@@ -616,6 +804,11 @@ def _write_manifest(
             "dry_run": config.dry_run,
             "force": config.force,
             "compute_checksums": config.compute_checksums,
+            "registry_file": (
+                str(config.registry_file.expanduser().resolve())
+                if config.registry_file is not None
+                else None
+            ),
         },
         "summary": {
             "files_discovered": result.discovered,
@@ -635,7 +828,9 @@ def _write_plots(plots_dir: Path | None, metrics: list[FileMetric]) -> None:
     if plots_dir is None:
         return
     plot_metrics = [
-        metric for metric in metrics if metric.status in {"ok", "skipped_existing"}
+        metric
+        for metric in metrics
+        if metric.status in {"ok", "skipped_existing", "skipped_registered"}
     ]
     if not plot_metrics:
         LOGGER.warning("No successful metrics available for plot generation")

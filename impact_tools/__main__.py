@@ -20,6 +20,7 @@ from impact_tools.config import (
     remove_extra_config,
 )
 from impact_tools.ega.encrypt import EncryptionConfig, run_encryption
+from impact_tools.ega.registry import DEFAULT_REGISTRY_PATH, EgaRegistry
 from impact_tools.ega.slurm import (
     SlurmEncryptionPlanConfig,
     submit_slurm_job,
@@ -258,7 +259,10 @@ def ega() -> None:
 @click.option(
     "--no-checksums",
     is_flag=True,
-    help="Skip SHA256 calculation. Faster, but less auditable.",
+    help=(
+        "Omit checksums from reports. The processing registry still requires "
+        "SHA256 when enabled."
+    ),
 )
 @click.option(
     "--no-plots",
@@ -269,6 +273,16 @@ def ega() -> None:
     "--fail-fast",
     is_flag=True,
     help="Stop at the first failed file instead of continuing with the batch.",
+)
+@click.option(
+    "--registry-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="SQLite registry used to track encrypted content across batches.",
+)
+@click.option(
+    "--no-registry",
+    is_flag=True,
+    help="Disable persistent content tracking for this encryption run.",
 )
 @click.pass_context
 def encrypt_cmd(
@@ -285,6 +299,8 @@ def encrypt_cmd(
     no_checksums: bool,
     no_plots: bool,
     fail_fast: bool,
+    registry_file: Path | None,
+    no_registry: bool,
 ) -> None:
     """Encrypt sequencing files with Crypt4GH and generate metrics."""
     configure_module_logging(ctx, "ega_encrypt")
@@ -299,6 +315,11 @@ def encrypt_cmd(
     crypt4gh_bin = crypt4gh_bin or _configured_path(
         configuration, "ega.encryption.crypt4gh_bin"
     )
+    registry_file = registry_file or _configured_path(
+        configuration, "ega.registry_file"
+    )
+    if no_registry:
+        registry_file = None
     if input_dir is None:
         raise click.UsageError(
             "--input-dir is required or must be set as ega.encryption.input_dir."
@@ -321,6 +342,7 @@ def encrypt_cmd(
         compute_checksums=not no_checksums,
         generate_plots=not no_plots,
         fail_fast=fail_fast,
+        registry_file=registry_file,
     )
     try:
         result = run_encryption(config)
@@ -400,7 +422,10 @@ def encrypt_cmd(
 @click.option(
     "--no-checksums",
     is_flag=True,
-    help="Skip local SHA256 calculation. Faster, but less auditable.",
+    help=(
+        "Omit checksums from reports. The processing registry still requires "
+        "SHA256 when enabled."
+    ),
 )
 @click.option(
     "--fail-fast",
@@ -411,6 +436,19 @@ def encrypt_cmd(
     "--connect-timeout",
     type=int,
     help="SFTP connection timeout in seconds.",
+)
+@click.option(
+    "--registry-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help=(
+        "SQLite registry used to avoid uploading content already submitted in "
+        "previous batches."
+    ),
+)
+@click.option(
+    "--no-registry",
+    is_flag=True,
+    help="Disable persistent content tracking for this upload.",
 )
 @click.pass_context
 def upload_inbox_cmd(
@@ -432,6 +470,8 @@ def upload_inbox_cmd(
     no_checksums: bool,
     fail_fast: bool,
     connect_timeout: int | None,
+    registry_file: Path | None,
+    no_registry: bool,
 ) -> None:
     """Upload encrypted .c4gh files to a LocalEGA inbox over SFTP."""
     configure_module_logging(ctx, "ega_upload_inbox")
@@ -453,6 +493,11 @@ def upload_inbox_cmd(
     connect_timeout = connect_timeout or int(
         get_config_value(configuration, "ega.inbox.connect_timeout", 30)
     )
+    registry_file = registry_file or _configured_path(
+        configuration, "ega.registry_file"
+    )
+    if no_registry:
+        registry_file = None
     if input_dir is None:
         raise click.UsageError(
             "--input-dir is required or must be set as ega.inbox.input_dir."
@@ -481,6 +526,7 @@ def upload_inbox_cmd(
         compute_checksums=not no_checksums,
         fail_fast=fail_fast,
         connect_timeout=connect_timeout,
+        registry_file=registry_file,
     )
     try:
         result = run_inbox_upload(config)
@@ -491,6 +537,76 @@ def upload_inbox_cmd(
             f"Inbox upload finished with {result.failed} failed file(s). "
             f"See log: {result.log_file}"
         )
+
+
+@ega.command("processing-history")
+@click.option(
+    "--registry-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="SQLite EGA processing registry to inspect.",
+)
+@click.option(
+    "--stage",
+    type=click.Choice(["all", "encrypted", "uploaded"]),
+    default="all",
+    show_default=True,
+    help="Processing stage to display.",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=100,
+    show_default=True,
+    help="Maximum number of recent successful processing events to show.",
+)
+@click.pass_context
+def processing_history_cmd(
+    ctx: click.Context,
+    registry_file: Path | None,
+    stage: str,
+    limit: int,
+) -> None:
+    """Show successful encryption and upload events across EGA batches."""
+    configuration = ctx.obj["configuration"]
+    registry_file = registry_file or _configured_path(
+        configuration, "ega.registry_file"
+    ) or DEFAULT_REGISTRY_PATH
+    if not registry_file.expanduser().exists():
+        raise click.ClickException(
+            f"Processing registry does not exist: {registry_file}"
+        )
+
+    with EgaRegistry(registry_file) as registry:
+        rows: list[tuple[str, str, str, str, str, str]] = []
+        if stage in {"all", "encrypted"}:
+            rows.extend(
+                (
+                    record.completed_at,
+                    "encrypted",
+                    record.sample_id,
+                    record.output_path,
+                    record.source_sha256,
+                    record.input_path,
+                )
+                for record in registry.list_encryptions(limit=limit)
+            )
+        if stage in {"all", "uploaded"}:
+            rows.extend(
+                (
+                    record.completed_at,
+                    "uploaded",
+                    record.sample_id,
+                    f"{record.endpoint}{record.remote_path}",
+                    record.sha256,
+                    record.local_path,
+                )
+                for record in registry.list_uploads(limit=limit)
+            )
+
+    rows.sort(key=lambda row: row[0], reverse=True)
+    click.echo("completed_at\tstage\tsample_id\tdestination\tsha256\tsource")
+    for row in rows[:limit]:
+        click.echo("\t".join(row))
 
 
 @cli.group()
@@ -1234,6 +1350,16 @@ def ingest_dataset_cmd(
     help="Do not pass --fail-fast to each encryption task.",
 )
 @click.option(
+    "--registry-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Shared SQLite processing registry passed to each array task.",
+)
+@click.option(
+    "--no-registry",
+    is_flag=True,
+    help="Disable persistent content tracking in generated array tasks.",
+)
+@click.option(
     "--submit",
     is_flag=True,
     help="Submit the generated sbatch file with sbatch.",
@@ -1264,6 +1390,8 @@ def encrypt_slurm_cmd(
     with_plots: bool,
     force: bool,
     continue_on_error: bool,
+    registry_file: Path | None,
+    no_registry: bool,
     submit: bool,
 ) -> None:
     """Generate and optionally submit SLURM array jobs for Crypt4GH encryption."""
@@ -1286,6 +1414,11 @@ def encrypt_slurm_cmd(
     crypt4gh_bin = crypt4gh_bin or _configured_path(
         configuration, "ega.slurm_encryption.crypt4gh_bin"
     ) or _configured_path(configuration, "ega.encryption.crypt4gh_bin")
+    registry_file = registry_file or _configured_path(
+        configuration, "ega.registry_file"
+    )
+    if no_registry:
+        registry_file = None
     if input_dir is None:
         raise click.UsageError(
             "--input-dir is required or must be set in the EGA encryption "
@@ -1333,6 +1466,7 @@ def encrypt_slurm_cmd(
         no_plots=not (with_plots or bool(slurm_conf.get("generate_plots", False))),
         force=force or bool(slurm_conf.get("force", False)),
         fail_fast=configured_fail_fast,
+        registry_file=registry_file,
     )
     try:
         result = write_slurm_encryption_plan(config)
