@@ -21,6 +21,8 @@ where possible.
 - Added persistent user configuration through `~/.impact_tools/extra_config.json`
   for logs, EGA encryption, Inbox uploads and SLURM defaults.
 - Added Beacon dataset ingestion workflow through `impact-tools beacon ingest dataset`. [#8](https://github.com/BU-ISCIII/impact-tools/pull/8)
+- Added a persistent SHA-256 processing registry to avoid re-encrypting or
+  resubmitting files that reappear in later batches or under different paths.
 
 ## [0.1.0] - 2026-05-21
 

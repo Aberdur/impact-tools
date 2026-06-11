@@ -334,6 +334,7 @@ Current focus:
 3. Plan HPC/SLURM array jobs for large encryption batches.
 4. Upload encrypted `.c4gh` files to the LocalEGA Inbox over SFTP.
 5. Generate upload metrics and manifests for traceability.
+6. Track successfully encrypted and uploaded content across incoming batches.
 
 ### Workflow Overview
 
@@ -518,6 +519,63 @@ impact-tools ega upload-inbox \
   --ask-password
 ```
 
+### Prevent Duplicate Batch Processing
+
+Successful encryptions and uploads are recorded by default in:
+
+```text
+~/.impact_tools/ega_registry.sqlite3
+```
+
+The registry identifies raw and encrypted files by their SHA-256 content hashes
+rather than their filenames or directories. Therefore, content already
+encrypted or uploaded in a previous batch is skipped even if it later appears
+under another sample folder or with another filename. R1 and R2 are tracked
+independently, so partial samples remain visible instead of being marked as a
+single completed unit.
+
+Only completed encryptions and SFTP uploads are recorded. Failed operations and
+dry runs never modify the registry. An existing encrypted output that does not
+match the registered input content is treated as a conflict and requires
+`--force` or another output directory. Existing remote files that were not
+uploaded by a registered run are reported as `skipped_existing`, but are not
+trusted and added automatically.
+
+Concurrent processes reserve each content hash atomically before encrypting or
+uploading it. Other workers report `skipped_in_progress` instead of processing
+the same content simultaneously. Reservations are released after success or
+failure, and abandoned reservations expire after 24 hours.
+
+Inspect recent successful encryption and upload events:
+
+```bash
+impact-tools ega processing-history --limit 50
+impact-tools ega processing-history --stage uploaded
+```
+
+Use another persistent registry:
+
+```bash
+impact-tools ega upload-inbox \
+  --registry-file /secure/impact-tools/ega_registry.sqlite3 \
+  ...
+```
+
+Use `--force` for intentional reprocessing, or `--no-registry` to disable
+content tracking for one execution. With the registry enabled, SHA-256 is
+still calculated internally when `--no-checksums` is selected because the hash
+is required to identify duplicate content.
+
+The registry confirms local encryption and completed SFTP transfer. It does not
+replace CEGA/LocalEGA accession, ingestion or dataset-release status.
+
+For SLURM arrays, place the registry on persistent storage with reliable POSIX
+file locking that is visible from every compute node. Atomic reservations then
+prevent separate array tasks from encrypting the same content concurrently. If
+the shared filesystem does not support SQLite locking correctly, use
+`--no-registry` for the array and perform duplicate control before generating
+the task plan.
+
 ### Upload Outputs
 
 Each upload run writes:
@@ -528,6 +586,10 @@ Each upload run writes:
 | `inbox_upload_summary_<run_id>.txt` | Human-readable batch summary. |
 | `inbox_upload_manifest_<run_id>.json` | Machine-readable upload manifest. |
 | `inbox_upload_<run_id>.log` | Detailed execution log. |
+
+Per-file statuses distinguish `ok`, `skipped_registered`,
+`skipped_in_progress`, `skipped_duplicate_batch`, `skipped_existing` and
+`failed`.
 
 ## Operational Notes
 
