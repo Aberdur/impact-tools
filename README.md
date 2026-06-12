@@ -342,25 +342,108 @@ Current focus:
 Raw sequencing files
         |
         v
-impact-tools ega encrypt
+impact-tools ega encrypt-upload
         |
         |  .c4gh files
-        |  metrics TSV
-        |  summary TXT
+        |  HTML dashboard
         |  manifest JSON
-        |  execution log
-        v
-Encrypted working area
-        |
-        v
-impact-tools ega upload-inbox
-        |
+        |  compact metrics TSV
+        |  execution logs
         v
 LocalEGA Inbox SFTP
         |
         v
 LocalEGA / CEGA ingestion, accessioning, release and distribution
 ```
+
+The standalone `ega encrypt` and `ega upload-inbox` commands remain available
+when both stages must be scheduled or operated independently.
+
+### Execution Profiles And End-to-End Runs
+
+Use `--run-profile ws`, `--run-profile local` or `--run-profile hpc` to label
+where a run was executed. Every encryption and upload manifest records the
+hostname, platform, Python version, CPU model/count, total memory, SLURM
+identifiers, stage wall time, CPU time, observed maximum RSS and
+coordinator-process I/O. CPU usage includes completed child processes; RSS is
+the highest observed Python or child-process lifetime peak, while I/O counters
+cover the Python coordinator only.
+
+The `encrypt-upload` wrapper encrypts a batch and then uploads exactly the
+outputs from that encryption result. It writes a closed upload input list and a
+small source tree of symbolic links, so older `.c4gh` files already present in
+the encrypted directory are not included accidentally. Registered encrypted
+outputs can be reused without copying their payload and still retain the sample
+layout selected for the Inbox upload.
+
+```bash
+impact-tools ega encrypt-upload \
+  --run-profile ws \
+  --input-dir /data/e2e/raw_fastq \
+  --encrypted-dir /data/e2e/encrypted_ws \
+  --output-dir /data/e2e/reports/ws \
+  --recipient-pubkey /secure/localega/service.key.pub \
+  --host dcontainers00 \
+  --username user@example.org \
+  --remote-layout relative \
+  --registry-file /secure/impact-tools/ega_registry.sqlite3 \
+  --ask-password
+```
+
+Run the same command on the HPC with `--run-profile hpc`, HPC-specific paths
+and a separate encrypted output directory. The same profile label is
+automatically propagated to SLURM encryption tasks.
+
+The comparison command accepts standalone encryption manifests, standalone
+Inbox upload manifests and end-to-end wrapper manifests. Compare the same
+stage independently when measuring one operation:
+
+```bash
+# Encryption-only comparison
+impact-tools ega compare-runs \
+  /data/e2e/encrypted_ws/encryption_manifest_<run_id>.json \
+  /shared/e2e/encrypted_hpc/encryption_manifest_<run_id>.json \
+  --output-dir /data/e2e/comparison/encryption
+
+# Upload-only comparison
+impact-tools ega compare-runs \
+  /data/e2e/uploads_ws/inbox_upload_manifest_<run_id>.json \
+  /shared/e2e/uploads_hpc/inbox_upload_manifest_<run_id>.json \
+  --output-dir /data/e2e/comparison/upload
+```
+
+Compare complete encryption-and-upload workflows:
+
+```bash
+impact-tools ega compare-runs \
+  /data/e2e/reports/ws/encrypt_upload_manifest_<run_id>.json \
+  /shared/e2e/reports/hpc/encrypt_upload_manifest_<run_id>.json \
+  --output-dir /data/e2e/comparison/workflow
+```
+
+Manifests from different run types can also be supplied together for a single
+operational overview. Metrics that do not apply to a run type remain empty
+instead of being represented as zero.
+
+Each run produces a self-contained HTML dashboard with summary cards, embedded
+charts, execution environment details and per-file results. The comparison
+produces one compact TSV and one HTML dashboard containing the available
+encryption throughput, upload throughput, stage runtime, end-to-end runtime and
+peak memory metrics. JSON manifests remain the complete machine-readable audit
+record; no separate PNG directory is needed.
+
+For a fair benchmark, compare the same run type using the same input files and,
+for encryption, the same Crypt4GH key. Use separate output directories and no
+competing jobs. Disable the processing registry for repeated benchmark
+executions, or use separate registry files, so one run is not reported as
+already processed. Avoid uploading the same remote filenames twice unless the
+Inbox test area has been cleaned or a separate `--remote-dir` is used.
+
+Standalone encryption and upload runs write
+`encryption_report_<run_id>.html` and `inbox_upload_report_<run_id>.html`.
+Use `--no-plots` on encryption to skip the legacy PNG directory while
+keeping charts embedded in the HTML report. Use `--no-charts` when a
+text-and-table HTML report is preferred.
 
 ### Encrypt Files
 
@@ -420,6 +503,7 @@ Each encryption run writes a complete audit bundle:
 
 | File | Content |
 | --- | --- |
+| `encryption_report_<run_id>.html` | Self-contained visual dashboard with metrics, charts, environment and file results. |
 | `encryption_metrics_<run_id>.tsv` | Per-file size, checksum, runtime, throughput, status and error fields. |
 | `encryption_summary_<run_id>.txt` | Human-readable batch summary. |
 | `encryption_manifest_<run_id>.json` | Machine-readable run manifest. |
@@ -582,6 +666,7 @@ Each upload run writes:
 
 | File | Content |
 | --- | --- |
+| `inbox_upload_report_<run_id>.html` | Self-contained visual dashboard with metrics, charts, environment and file results. |
 | `inbox_upload_metrics_<run_id>.tsv` | Per-file upload status, size, timing, throughput and checksum. |
 | `inbox_upload_summary_<run_id>.txt` | Human-readable batch summary. |
 | `inbox_upload_manifest_<run_id>.json` | Machine-readable upload manifest. |
