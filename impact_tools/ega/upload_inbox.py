@@ -11,9 +11,16 @@ import posixpath
 import socket
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 
+from impact_tools.ega.execution import (
+    ProcessMetrics,
+    collect_execution_environment,
+    finish_process_metrics,
+    make_run_id,
+    start_process_metrics,
+)
+from impact_tools.ega.html_report import write_upload_report
 from impact_tools.ega.registry import (
     DEFAULT_REGISTRY_PATH,
     EgaRegistry,
@@ -64,6 +71,8 @@ class InboxUploadConfig:
     fail_fast: bool = False
     connect_timeout: int = 30
     registry_file: Path | None = DEFAULT_REGISTRY_PATH
+    run_profile: str = "local"
+    generate_report_charts: bool = True
 
 
 @dataclass
@@ -92,24 +101,28 @@ class InboxUploadResult:
     metrics_file: Path
     summary_file: Path
     manifest_file: Path
+    report_file: Path
     log_file: Path
     discovered: int
     uploaded: int
     skipped: int
     failed: int
     total_input_bytes: int
+    uploaded_input_bytes: int
     total_upload_seconds: float
+    process: ProcessMetrics
 
 
 def run_inbox_upload(config: InboxUploadConfig) -> InboxUploadResult:
     """Upload selected encrypted files to a LocalEGA inbox over SFTP."""
+    process_start = start_process_metrics()
     input_dir = config.input_dir.expanduser().resolve()
     output_dir = (
         config.output_dir.expanduser().resolve()
         if config.output_dir is not None
         else input_dir / "inbox_upload_reports"
     )
-    run_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    run_id = make_run_id()
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / f"inbox_upload_{run_id}.log"
     file_handler = _attach_run_log(log_file)
@@ -193,6 +206,7 @@ def run_inbox_upload(config: InboxUploadConfig) -> InboxUploadResult:
         metrics_file = output_dir / f"inbox_upload_metrics_{run_id}.tsv"
         summary_file = output_dir / f"inbox_upload_summary_{run_id}.txt"
         manifest_file = output_dir / f"inbox_upload_manifest_{run_id}.json"
+        report_file = output_dir / f"inbox_upload_report_{run_id}.html"
 
         _write_metrics(metrics_file, metrics)
         result = _build_result(
@@ -201,14 +215,32 @@ def run_inbox_upload(config: InboxUploadConfig) -> InboxUploadResult:
             metrics_file=metrics_file,
             summary_file=summary_file,
             manifest_file=manifest_file,
+            report_file=report_file,
             log_file=log_file,
             metrics=metrics,
+            process=finish_process_metrics(process_start),
         )
         _write_summary(summary_file, result, config, input_dir)
         _write_manifest(manifest_file, result, config, input_dir, metrics)
+        manifest_payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+        manifest_payload.update(
+            {
+                "manifest_file": str(manifest_file),
+                "metrics_file": str(metrics_file),
+                "summary_file": str(summary_file),
+                "log_file": str(log_file),
+                "report_file": str(report_file),
+            }
+        )
+        write_upload_report(
+            report_file,
+            manifest_payload,
+            include_charts=config.generate_report_charts,
+        )
         LOGGER.info("Metrics written to %s", metrics_file)
         LOGGER.info("Summary written to %s", summary_file)
         LOGGER.info("Manifest written to %s", manifest_file)
+        LOGGER.info("HTML report written to %s", report_file)
         LOGGER.info("Run log written to %s", log_file)
         return result
     finally:
@@ -262,7 +294,7 @@ def _read_input_list(input_list: Path, input_dir: Path, output_dir: Path) -> lis
             candidate = Path(line).expanduser()
             if not candidate.is_absolute():
                 candidate = input_dir / candidate
-            candidate = candidate.resolve()
+            candidate = candidate.absolute()
             if not candidate.is_file():
                 raise FileNotFoundError(
                     f"Input list entry does not exist or is not a file "
@@ -564,7 +596,8 @@ def _upload_file_claimed(
 ) -> UploadMetric:
     remote_path = _remote_path(local_file, input_dir, config)
     size = local_file.stat().st_size
-    LOGGER.info("Uploading %s -> %s", local_file.relative_to(input_dir), remote_path)
+    display_path = _display_path(local_file, input_dir)
+    LOGGER.info("Uploading %s -> %s", display_path, remote_path)
     try:
         if _remote_exists(sftp, remote_path) and not config.force:
             LOGGER.warning("Skipping existing remote file: %s", remote_path)
@@ -587,7 +620,7 @@ def _upload_file_claimed(
         throughput = _throughput(size, seconds)
         LOGGER.info(
             "Uploaded %s in %.3fs at %s MiB/s",
-            local_file.relative_to(input_dir),
+            display_path,
             seconds,
             "NA" if throughput is None else f"{throughput:.3f}",
         )
@@ -632,7 +665,13 @@ def _remote_path(local_file: Path, input_dir: Path, config: InboxUploadConfig) -
     remote_dir = _normalize_remote_dir(config.remote_dir)
     if config.remote_layout == "flat":
         return posixpath.join(remote_dir, local_file.name)
-    relative_path = local_file.relative_to(input_dir).as_posix()
+    try:
+        relative_path = local_file.relative_to(input_dir).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            "Relative Inbox layout requires every input-list file to be under "
+            f"the input directory ({input_dir}): {local_file}"
+        ) from exc
     return posixpath.join(remote_dir, relative_path)
 
 
@@ -690,10 +729,20 @@ def _metric(
 
 
 def _sample_id_for_file(local_file: Path, input_dir: Path) -> str:
-    relative_parent = local_file.relative_to(input_dir).parent
+    try:
+        relative_parent = local_file.relative_to(input_dir).parent
+    except ValueError:
+        return local_file.parent.name
     if relative_parent == Path("."):
         return input_dir.name
     return str(relative_parent)
+
+
+def _display_path(local_file: Path, input_dir: Path) -> Path:
+    try:
+        return local_file.relative_to(input_dir)
+    except ValueError:
+        return local_file
 
 
 def _sha256(path: Path) -> str:
@@ -724,8 +773,10 @@ def _build_result(
     metrics_file: Path,
     summary_file: Path,
     manifest_file: Path,
+    report_file: Path,
     log_file: Path,
     metrics: list[UploadMetric],
+    process: ProcessMetrics,
 ) -> InboxUploadResult:
     ok_metrics = [metric for metric in metrics if metric.status == "ok"]
     return InboxUploadResult(
@@ -734,13 +785,16 @@ def _build_result(
         metrics_file=metrics_file,
         summary_file=summary_file,
         manifest_file=manifest_file,
+        report_file=report_file,
         log_file=log_file,
         discovered=len(metrics),
         uploaded=len(ok_metrics),
         skipped=sum(metric.status.startswith("skipped_") for metric in metrics),
         failed=sum(metric.status == "failed" for metric in metrics),
         total_input_bytes=sum(metric.local_size_bytes for metric in metrics),
+        uploaded_input_bytes=sum(metric.local_size_bytes for metric in ok_metrics),
         total_upload_seconds=sum(metric.upload_seconds for metric in ok_metrics),
+        process=process,
     )
 
 
@@ -750,10 +804,14 @@ def _write_summary(
     config: InboxUploadConfig,
     input_dir: Path,
 ) -> None:
-    throughput = _throughput(result.total_input_bytes, result.total_upload_seconds)
+    throughput = _throughput(
+        result.uploaded_input_bytes,
+        result.total_upload_seconds,
+    )
     lines = [
         "Go-IMPaCT LocalEGA inbox upload report",
         f"Run ID: {result.run_id}",
+        f"Run profile: {config.run_profile}",
         f"Input directory: {input_dir}",
         f"Output directory: {result.output_dir}",
         f"Inbox host: {config.host}",
@@ -775,6 +833,12 @@ def _write_summary(
         f"Total input GiB: {result.total_input_bytes / BYTES_IN_GIB:.3f}",
         f"Total upload seconds: {result.total_upload_seconds:.6f}",
         f"Overall throughput MiB/s: {'NA' if throughput is None else f'{throughput:.3f}'}",
+        f"Stage wall seconds: {result.process.wall_seconds:.6f}",
+        f"CPU user seconds: {result.process.user_seconds:.6f}",
+        f"CPU system seconds: {result.process.system_seconds:.6f}",
+        f"Observed maximum RSS MiB: {result.process.max_rss_mib:.3f}",
+        f"Coordinator process read bytes: {result.process.read_bytes}",
+        f"Coordinator process write bytes: {result.process.write_bytes}",
         "",
         f"Metrics TSV: {result.metrics_file}",
         f"Manifest JSON: {result.manifest_file}",
@@ -791,6 +855,7 @@ def _write_manifest(
     metrics: list[UploadMetric],
 ) -> None:
     payload = {
+        "execution": collect_execution_environment(config.run_profile).as_dict(),
         "run": {
             "run_id": result.run_id,
             "input_dir": str(input_dir),
@@ -822,7 +887,9 @@ def _write_manifest(
             "skipped": result.skipped,
             "failed": result.failed,
             "total_input_bytes": result.total_input_bytes,
+            "uploaded_input_bytes": result.uploaded_input_bytes,
             "total_upload_seconds": result.total_upload_seconds,
+            "process": asdict(result.process),
         },
         "files": [asdict(metric) for metric in metrics],
     }

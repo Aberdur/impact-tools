@@ -12,6 +12,9 @@ from rich.logging import RichHandler
 from rich.traceback import install as install_rich_traceback
 
 from impact_tools import __version__
+from impact_tools.beacon import ingest as beacon_ingest
+from impact_tools.beacon import liftover as beacon_liftover
+from impact_tools.beacon import pgx as beacon_pgx
 from impact_tools.config import (
     EXTRA_CONFIG_PATH,
     get_config_value,
@@ -19,6 +22,7 @@ from impact_tools.config import (
     load_configuration,
     remove_extra_config,
 )
+from impact_tools.ega.benchmark import compare_runs
 from impact_tools.ega.encrypt import EncryptionConfig, run_encryption
 from impact_tools.ega.registry import DEFAULT_REGISTRY_PATH, EgaRegistry
 from impact_tools.ega.slurm import (
@@ -27,9 +31,7 @@ from impact_tools.ega.slurm import (
     write_slurm_encryption_plan,
 )
 from impact_tools.ega.upload_inbox import InboxUploadConfig, run_inbox_upload
-from impact_tools.beacon import liftover as beacon_liftover
-from impact_tools.beacon import pgx as beacon_pgx
-from impact_tools.beacon import ingest as beacon_ingest
+from impact_tools.ega.workflow import EncryptUploadConfig, run_encrypt_upload
 
 log = logging.getLogger(__name__)
 
@@ -215,7 +217,7 @@ def ega() -> None:
     "-o",
     "--output-dir",
     type=click.Path(path_type=Path, file_okay=False),
-    help="Directory for encrypted files, metrics, logs and plots.",
+    help="Directory for encrypted files, HTML report, metrics and logs.",
 )
 @click.option(
     "-k",
@@ -267,7 +269,12 @@ def ega() -> None:
 @click.option(
     "--no-plots",
     is_flag=True,
-    help="Do not generate PNG plots from metrics.",
+    help="Do not generate the legacy directory of PNG plots.",
+)
+@click.option(
+    "--no-charts",
+    is_flag=True,
+    help="Omit embedded charts from the HTML report.",
 )
 @click.option(
     "--fail-fast",
@@ -284,6 +291,11 @@ def ega() -> None:
     is_flag=True,
     help="Disable persistent content tracking for this encryption run.",
 )
+@click.option(
+    "--run-profile",
+    type=click.Choice(["local", "ws", "hpc"]),
+    help="Execution environment label recorded in metrics and manifests.",
+)
 @click.pass_context
 def encrypt_cmd(
     ctx: click.Context,
@@ -298,9 +310,11 @@ def encrypt_cmd(
     dry_run: bool,
     no_checksums: bool,
     no_plots: bool,
+    no_charts: bool,
     fail_fast: bool,
     registry_file: Path | None,
     no_registry: bool,
+    run_profile: str | None,
 ) -> None:
     """Encrypt sequencing files with Crypt4GH and generate metrics."""
     configure_module_logging(ctx, "ega_encrypt")
@@ -320,6 +334,9 @@ def encrypt_cmd(
     )
     if no_registry:
         registry_file = None
+    run_profile = run_profile or get_config_value(
+        configuration, "ega.execution.profile", "local"
+    )
     if input_dir is None:
         raise click.UsageError(
             "--input-dir is required or must be set as ega.encryption.input_dir."
@@ -341,13 +358,16 @@ def encrypt_cmd(
         dry_run=dry_run,
         compute_checksums=not no_checksums,
         generate_plots=not no_plots,
+        generate_report_charts=not no_charts,
         fail_fast=fail_fast,
         registry_file=registry_file,
+        run_profile=run_profile,
     )
     try:
         result = run_encryption(config)
     except Exception as exc:  # noqa: BLE001 - CLI boundary converts to clean error
         raise click.ClickException(str(exc)) from exc
+    click.echo(f"HTML report: {result.report_file}")
     if result.failed > 0:
         raise click.ClickException(
             f"Encryption finished with {result.failed} failed file(s). "
@@ -369,7 +389,7 @@ def encrypt_cmd(
     "-o",
     "--output-dir",
     type=click.Path(path_type=Path, file_okay=False),
-    help="Directory for upload metrics, logs and manifests.",
+    help="Directory for the HTML report, upload metrics, logs and manifests.",
 )
 @click.option("--host", help="Inbox SFTP host.")
 @click.option("--port", type=int, help="Inbox SFTP port.")
@@ -381,8 +401,6 @@ def encrypt_cmd(
 @click.option(
     "--remote-layout",
     type=click.Choice(["flat", "relative"]),
-    default="flat",
-    show_default=True,
     help=(
         "Upload files directly into remote-dir (flat) or preserve paths relative "
         "to input-dir (relative)."
@@ -428,6 +446,11 @@ def encrypt_cmd(
     ),
 )
 @click.option(
+    "--no-charts",
+    is_flag=True,
+    help="Omit embedded charts from the HTML report.",
+)
+@click.option(
     "--fail-fast",
     is_flag=True,
     help="Stop at the first failed upload instead of continuing with the batch.",
@@ -450,6 +473,11 @@ def encrypt_cmd(
     is_flag=True,
     help="Disable persistent content tracking for this upload.",
 )
+@click.option(
+    "--run-profile",
+    type=click.Choice(["local", "ws", "hpc"]),
+    help="Execution environment label recorded in metrics and manifests.",
+)
 @click.pass_context
 def upload_inbox_cmd(
     ctx: click.Context,
@@ -459,7 +487,7 @@ def upload_inbox_cmd(
     port: int | None,
     username: str | None,
     remote_dir: str | None,
-    remote_layout: str,
+    remote_layout: str | None,
     input_list: Path | None,
     pattern: str,
     identity_file: Path | None,
@@ -468,10 +496,12 @@ def upload_inbox_cmd(
     force: bool,
     dry_run: bool,
     no_checksums: bool,
+    no_charts: bool,
     fail_fast: bool,
     connect_timeout: int | None,
     registry_file: Path | None,
     no_registry: bool,
+    run_profile: str | None,
 ) -> None:
     """Upload encrypted .c4gh files to a LocalEGA inbox over SFTP."""
     configure_module_logging(ctx, "ega_upload_inbox")
@@ -483,6 +513,9 @@ def upload_inbox_cmd(
     username = username or get_config_value(configuration, "ega.inbox.username")
     remote_dir = remote_dir or get_config_value(
         configuration, "ega.inbox.remote_dir", "/"
+    )
+    remote_layout = remote_layout or get_config_value(
+        configuration, "ega.inbox.remote_layout", "flat"
     )
     identity_file = identity_file or _configured_path(
         configuration, "ega.inbox.identity_file"
@@ -498,6 +531,9 @@ def upload_inbox_cmd(
     )
     if no_registry:
         registry_file = None
+    run_profile = run_profile or get_config_value(
+        configuration, "ega.execution.profile", "local"
+    )
     if input_dir is None:
         raise click.UsageError(
             "--input-dir is required or must be set as ega.inbox.input_dir."
@@ -524,19 +560,251 @@ def upload_inbox_cmd(
         force=force,
         dry_run=dry_run,
         compute_checksums=not no_checksums,
+        generate_report_charts=not no_charts,
         fail_fast=fail_fast,
         connect_timeout=connect_timeout,
         registry_file=registry_file,
+        run_profile=run_profile,
     )
     try:
         result = run_inbox_upload(config)
     except Exception as exc:  # noqa: BLE001 - CLI boundary converts to clean error
         raise click.ClickException(str(exc)) from exc
+    click.echo(f"HTML report: {result.report_file}")
     if result.failed > 0:
         raise click.ClickException(
             f"Inbox upload finished with {result.failed} failed file(s). "
             f"See log: {result.log_file}"
         )
+
+
+@ega.command("encrypt-upload")
+@click.option(
+    "-i",
+    "--input-dir",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    help="Directory containing the raw files or sample directories.",
+)
+@click.option(
+    "--encrypted-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Directory where encrypted .c4gh files are written.",
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Directory for the combined workflow report and upload reports.",
+)
+@click.option(
+    "-k",
+    "--recipient-pubkey",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="LocalEGA Crypt4GH recipient public key.",
+)
+@click.option(
+    "--crypt4gh-bin",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="crypt4gh executable. Defaults to configuration or PATH.",
+)
+@click.option("--pattern", default="*.fastq.gz", show_default=True)
+@click.option("--host", help="Inbox SFTP host.")
+@click.option("--port", type=int, help="Inbox SFTP port.")
+@click.option("-u", "--username", help="Inbox username.")
+@click.option("--remote-dir", help="Remote Inbox directory.")
+@click.option(
+    "--remote-layout",
+    type=click.Choice(["flat", "relative"]),
+    help="Upload all files together or preserve their relative directories.",
+)
+@click.option(
+    "--identity-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="SSH private key for Inbox authentication.",
+)
+@click.option("--ask-password", is_flag=True, help="Prompt for the EGA password.")
+@click.option(
+    "--run-profile",
+    type=click.Choice(["local", "ws", "hpc"]),
+    help="Execution environment label stored with the metrics.",
+)
+@click.option(
+    "--registry-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="SQLite registry shared by encryption and upload.",
+)
+@click.option("--force", is_flag=True, help="Replace existing outputs.")
+@click.option("--no-checksums", is_flag=True)
+@click.option(
+    "--no-charts",
+    "--no-plots",
+    is_flag=True,
+    help="Omit charts from the HTML report.",
+)
+@click.option("--no-registry", is_flag=True)
+@click.pass_context
+def encrypt_upload_cmd(
+    ctx: click.Context,
+    input_dir: Path | None,
+    encrypted_dir: Path | None,
+    output_dir: Path | None,
+    recipient_pubkey: Path | None,
+    crypt4gh_bin: Path | None,
+    pattern: str,
+    host: str | None,
+    port: int | None,
+    username: str | None,
+    remote_dir: str | None,
+    remote_layout: str | None,
+    identity_file: Path | None,
+    ask_password: bool,
+    run_profile: str | None,
+    registry_file: Path | None,
+    force: bool,
+    no_checksums: bool,
+    no_charts: bool,
+    no_registry: bool,
+) -> None:
+    """Encrypt a batch and upload exactly the resulting files."""
+    configure_module_logging(ctx, "ega_encrypt_upload")
+    configuration = ctx.obj["configuration"]
+    input_dir = input_dir or _configured_path(configuration, "ega.encryption.input_dir")
+    encrypted_dir = encrypted_dir or _configured_path(
+        configuration, "ega.encryption.output_dir"
+    )
+    recipient_pubkey = recipient_pubkey or _configured_path(
+        configuration, "ega.encryption.recipient_pubkey"
+    )
+    crypt4gh_bin = crypt4gh_bin or _configured_path(
+        configuration, "ega.encryption.crypt4gh_bin"
+    )
+    output_dir = output_dir or _configured_path(
+        configuration, "ega.workflow.output_dir"
+    )
+    host = host or get_config_value(configuration, "ega.inbox.host")
+    port = port or int(get_config_value(configuration, "ega.inbox.port", 2222))
+    username = username or get_config_value(configuration, "ega.inbox.username")
+    remote_dir = remote_dir or get_config_value(
+        configuration, "ega.inbox.remote_dir", "/"
+    )
+    remote_layout = remote_layout or get_config_value(
+        configuration, "ega.inbox.remote_layout", "flat"
+    )
+    identity_file = identity_file or _configured_path(
+        configuration, "ega.inbox.identity_file"
+    )
+    run_profile = run_profile or get_config_value(
+        configuration, "ega.execution.profile", "local"
+    )
+    if no_registry:
+        registry_file = None
+    else:
+        registry_file = registry_file or _configured_path(
+            configuration, "ega.registry_file"
+        )
+
+    if input_dir is None:
+        raise click.UsageError("--input-dir is required or must be configured.")
+    if recipient_pubkey is None:
+        raise click.UsageError(
+            "--recipient-pubkey is required or must be configured."
+        )
+    if not host or not username:
+        raise click.UsageError("Inbox --host and --username are required.")
+    encrypted_dir = encrypted_dir or input_dir / "encrypted_c4gh"
+    output_dir = output_dir or encrypted_dir / "workflow_reports"
+
+    workflow_config = EncryptUploadConfig(
+        run_profile=run_profile,
+        output_dir=output_dir,
+        generate_report_charts=not no_charts,
+        encryption=EncryptionConfig(
+            input_dir=input_dir,
+            output_dir=encrypted_dir,
+            recipient_pubkey=recipient_pubkey,
+            crypt4gh_bin=crypt4gh_bin,
+            pattern=pattern,
+            force=force,
+            compute_checksums=not no_checksums,
+            generate_plots=False,
+            generate_report_charts=False,
+            fail_fast=True,
+            registry_file=registry_file,
+            run_profile=run_profile,
+        ),
+        upload=InboxUploadConfig(
+            input_dir=encrypted_dir,
+            output_dir=output_dir / "upload",
+            host=host,
+            port=port,
+            username=username,
+            remote_dir=remote_dir,
+            remote_layout=remote_layout,
+            identity_file=identity_file,
+            ask_password=ask_password,
+            host_key_policy=get_config_value(
+                configuration, "ega.inbox.host_key_policy", "auto-add"
+            ),
+            force=force,
+            compute_checksums=not no_checksums,
+            fail_fast=True,
+            connect_timeout=int(
+                get_config_value(configuration, "ega.inbox.connect_timeout", 30)
+            ),
+            registry_file=registry_file,
+            run_profile=run_profile,
+        ),
+    )
+    try:
+        result = run_encrypt_upload(workflow_config)
+    except Exception as exc:  # noqa: BLE001
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Workflow manifest: {result.manifest_file}")
+    click.echo(f"HTML report: {result.report_file}")
+    if result.upload.failed:
+        raise click.ClickException(
+            f"Inbox upload finished with {result.upload.failed} failed file(s). "
+            f"See log: {result.upload.log_file}"
+        )
+
+
+@ega.command("compare-runs")
+@click.argument(
+    "manifests",
+    nargs=-1,
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=Path("ega_run_comparison"),
+    show_default=True,
+)
+@click.option(
+    "--no-charts",
+    "--no-plots",
+    is_flag=True,
+    help="Omit charts from the HTML comparison report.",
+)
+def compare_runs_cmd(
+    manifests: tuple[Path, ...],
+    output_dir: Path,
+    no_charts: bool,
+) -> None:
+    """Compare encryption, Inbox upload and end-to-end run manifests."""
+    try:
+        result = compare_runs(
+            manifests,
+            output_dir,
+            generate_charts=not no_charts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Compared runs: {result.runs}")
+    click.echo(f"Metrics: {result.metrics_file}")
+    click.echo(f"HTML report: {result.report_file}")
 
 
 @ega.command("processing-history")

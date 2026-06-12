@@ -1,0 +1,9 @@
+{% extends "base_report.html" %}
+{% from "report_components.html" import header, cards, charts, table %}
+
+{% block content %}
+{{ header(report_title, badge) }}
+{{ cards(summary_cards) }}
+{{ charts("Performance comparison", performance_charts) }}
+{{ table("Run details", comparison_headers, comparison_rows) }}
+{% endblock %}
