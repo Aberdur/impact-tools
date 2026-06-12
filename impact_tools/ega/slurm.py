@@ -60,6 +60,7 @@ class SlurmEncryptionPlanConfig:
     force: bool = False
     fail_fast: bool = True
     registry_file: Path | None = None
+    run_profile: str = "hpc"
 
 
 @dataclass(frozen=True)
@@ -388,6 +389,8 @@ def _write_sbatch(
         str(recipient_pubkey),
         "--output-dir",
         str(output_dir),
+        "--run-profile",
+        config.run_profile,
     ]
     if config.crypt4gh_bin is not None:
         command.extend(["--crypt4gh-bin", str(config.crypt4gh_bin.expanduser().resolve())])

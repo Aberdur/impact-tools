@@ -5,6 +5,12 @@
   },
   "ega": {
     "registry_file": "~/.impact_tools/ega_registry.sqlite3",
+    "execution": {
+      "profile": "local"
+    },
+    "workflow": {
+      "output_dir": null
+    },
     "encryption": {
       "input_dir": null,
       "output_dir": null,
@@ -18,6 +24,7 @@
       "port": 2222,
       "username": null,
       "remote_dir": "/",
+      "remote_layout": "flat",
       "identity_file": null,
       "host_key_policy": "auto-add",
       "connect_timeout": 30

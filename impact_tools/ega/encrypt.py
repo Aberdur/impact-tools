@@ -10,9 +10,16 @@ import shutil
 import subprocess
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 
+from impact_tools.ega.execution import (
+    ProcessMetrics,
+    collect_execution_environment,
+    finish_process_metrics,
+    make_run_id,
+    start_process_metrics,
+)
+from impact_tools.ega.html_report import write_encryption_report
 from impact_tools.ega.registry import DEFAULT_REGISTRY_PATH, EgaRegistry
 
 
@@ -58,8 +65,10 @@ class EncryptionConfig:
     dry_run: bool = False
     compute_checksums: bool = True
     generate_plots: bool = True
+    generate_report_charts: bool = True
     fail_fast: bool = False
     registry_file: Path | None = DEFAULT_REGISTRY_PATH
+    run_profile: str = "local"
 
 
 @dataclass
@@ -95,6 +104,7 @@ class EncryptionResult:
     metrics_file: Path
     summary_file: Path
     manifest_file: Path
+    report_file: Path
     log_file: Path
     plots_dir: Path | None
     discovered: int
@@ -102,12 +112,15 @@ class EncryptionResult:
     skipped: int
     failed: int
     total_input_bytes: int
+    processed_input_bytes: int
     total_output_bytes: int
     total_encryption_seconds: float
+    process: ProcessMetrics
 
 
 def run_encryption(config: EncryptionConfig) -> EncryptionResult:
     """Encrypt all matching files and write metrics, summary and optional plots."""
+    process_start = start_process_metrics()
     input_dir = config.input_dir.expanduser().resolve()
     recipient_pubkey = config.recipient_pubkey.expanduser().resolve()
     output_dir = (
@@ -115,7 +128,7 @@ def run_encryption(config: EncryptionConfig) -> EncryptionResult:
         if config.output_dir is not None
         else input_dir / "encrypted_c4gh"
     )
-    run_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    run_id = make_run_id()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = output_dir / f"encryption_{run_id}.log"
@@ -188,6 +201,7 @@ def run_encryption(config: EncryptionConfig) -> EncryptionResult:
         metrics_file = output_dir / f"encryption_metrics_{run_id}.tsv"
         summary_file = output_dir / f"encryption_summary_{run_id}.txt"
         manifest_file = output_dir / f"encryption_manifest_{run_id}.json"
+        report_file = output_dir / f"encryption_report_{run_id}.html"
         plots_dir = output_dir / f"plots_{run_id}" if config.generate_plots else None
 
         _write_metrics(metrics_file, metrics)
@@ -197,9 +211,11 @@ def run_encryption(config: EncryptionConfig) -> EncryptionResult:
             metrics_file=metrics_file,
             summary_file=summary_file,
             manifest_file=manifest_file,
+            report_file=report_file,
             log_file=log_file,
             plots_dir=plots_dir,
             metrics=metrics,
+            process=finish_process_metrics(process_start),
         )
         _write_summary(
             summary_file,
@@ -218,12 +234,28 @@ def run_encryption(config: EncryptionConfig) -> EncryptionResult:
             Path(crypt4gh_bin),
             metrics,
         )
+        manifest_payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+        manifest_payload.update(
+            {
+                "manifest_file": str(manifest_file),
+                "metrics_file": str(metrics_file),
+                "summary_file": str(summary_file),
+                "log_file": str(log_file),
+                "report_file": str(report_file),
+            }
+        )
+        write_encryption_report(
+            report_file,
+            manifest_payload,
+            include_charts=config.generate_report_charts,
+        )
         if config.generate_plots:
             _write_plots(plots_dir, metrics)
 
         LOGGER.info("Metrics written to %s", metrics_file)
         LOGGER.info("Summary written to %s", summary_file)
         LOGGER.info("Manifest written to %s", manifest_file)
+        LOGGER.info("HTML report written to %s", report_file)
         LOGGER.info("Run log written to %s", log_file)
         if plots_dir is not None and plots_dir.exists():
             LOGGER.info("Plots written to %s", plots_dir)
@@ -697,9 +729,11 @@ def _build_result(
     metrics_file: Path,
     summary_file: Path,
     manifest_file: Path,
+    report_file: Path,
     log_file: Path,
     plots_dir: Path | None,
     metrics: list[FileMetric],
+    process: ProcessMetrics,
 ) -> EncryptionResult:
     ok_metrics = [metric for metric in metrics if metric.status == "ok"]
     output_metrics = [
@@ -713,6 +747,7 @@ def _build_result(
         metrics_file=metrics_file,
         summary_file=summary_file,
         manifest_file=manifest_file,
+        report_file=report_file,
         log_file=log_file,
         plots_dir=plots_dir,
         discovered=len(metrics),
@@ -720,8 +755,10 @@ def _build_result(
         skipped=sum(metric.status.startswith("skipped_") for metric in metrics),
         failed=sum(metric.status == "failed" for metric in metrics),
         total_input_bytes=sum(metric.input_size_bytes for metric in metrics),
+        processed_input_bytes=sum(metric.input_size_bytes for metric in ok_metrics),
         total_output_bytes=sum(metric.output_size_bytes for metric in output_metrics),
         total_encryption_seconds=sum(metric.encryption_seconds for metric in ok_metrics),
+        process=process,
     )
 
 
@@ -733,7 +770,10 @@ def _write_summary(
     recipient_pubkey: Path,
     crypt4gh_bin: Path,
 ) -> None:
-    throughput = _throughput(result.total_input_bytes, result.total_encryption_seconds)
+    throughput = _throughput(
+        result.processed_input_bytes,
+        result.total_encryption_seconds,
+    )
     ratio = (
         result.total_output_bytes / result.total_input_bytes
         if result.total_input_bytes
@@ -752,6 +792,7 @@ def _write_summary(
         f"Output directory: {result.output_dir}",
         f"Recipient public key: {recipient_pubkey}",
         f"Crypt4GH executable: {crypt4gh_bin}",
+        f"Run profile: {config.run_profile}",
         f"Pattern: {config.pattern}",
         f"Input list: {config.input_list.expanduser().resolve() if config.input_list else 'NA'}",
         f"Dry-run: {config.dry_run}",
@@ -769,6 +810,12 @@ def _write_summary(
         f"Overall overhead percent: {'NA' if overhead is None else f'{overhead:.6f}'}",
         f"Total encryption seconds: {result.total_encryption_seconds:.6f}",
         f"Overall throughput MiB/s: {'NA' if throughput is None else f'{throughput:.3f}'}",
+        f"Stage wall seconds: {result.process.wall_seconds:.6f}",
+        f"CPU user seconds: {result.process.user_seconds:.6f}",
+        f"CPU system seconds: {result.process.system_seconds:.6f}",
+        f"Observed maximum RSS MiB: {result.process.max_rss_mib:.3f}",
+        f"Coordinator process read bytes: {result.process.read_bytes}",
+        f"Coordinator process write bytes: {result.process.write_bytes}",
         "",
         f"Metrics TSV: {result.metrics_file}",
         f"Manifest JSON: {result.manifest_file}",
@@ -789,6 +836,7 @@ def _write_manifest(
     metrics: list[FileMetric],
 ) -> None:
     payload = {
+        "execution": collect_execution_environment(config.run_profile).as_dict(),
         "run": {
             "run_id": result.run_id,
             "input_dir": str(input_dir),
@@ -816,8 +864,10 @@ def _write_manifest(
             "skipped": result.skipped,
             "failed": result.failed,
             "total_input_bytes": result.total_input_bytes,
+            "processed_input_bytes": result.processed_input_bytes,
             "total_output_bytes": result.total_output_bytes,
             "total_encryption_seconds": result.total_encryption_seconds,
+            "process": asdict(result.process),
         },
         "files": [asdict(metric) for metric in metrics],
     }
