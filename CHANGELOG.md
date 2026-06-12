@@ -23,6 +23,11 @@ where possible.
 - Added Beacon dataset ingestion workflow through `impact-tools beacon ingest dataset`. [#8](https://github.com/BU-ISCIII/impact-tools/pull/8)
 - Added a persistent SHA-256 processing registry to avoid re-encrypting or
   resubmitting files that reappear in later batches or under different paths.
+- Added local, workstation and HPC execution profiles with host, process and
+  SLURM metrics for comparable EGA runs.
+- Added an end-to-end encryption and Inbox upload wrapper plus self-contained
+  HTML dashboards for individual runs and independent or combined WS/HPC
+  comparisons of encryption, upload and complete workflows.
 
 ## [0.1.0] - 2026-05-21
 
