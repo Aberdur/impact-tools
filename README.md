@@ -697,6 +697,21 @@ impact-tools ega encrypt-slurm \
   --recipient-pubkey /path/to/service.key.pub
 ```
 
+For throughput benchmarks, prefer file-level tasks or small chunks so SLURM can
+spread the work across compute nodes while the registry prevents duplicate
+processing:
+
+```bash
+impact-tools ega encrypt-slurm \
+  --input-dir /impact_data/raw_data/lega \
+  --output-dir /impact_data/raw_data/lega/encrypted_c4gh \
+  --recipient-pubkey /path/to/service.key.pub \
+  --registry-file /impact_data/logs/impact-tools/ega/ega_registry.sqlite3 \
+  --task-layout file \
+  --items-per-task 1 \
+  --plan-dir /impact_data/logs/impact-tools/ega/slurm-plans
+```
+
 SLURM defaults such as partition, CPUs, memory and time limit are read from
 `impact_tools/conf/configuration.json`. Use CLI options only when a particular
 run needs to override those defaults.
@@ -826,9 +841,10 @@ The registry confirms local encryption and completed SFTP transfer. It does not
 replace CEGA/LocalEGA accession, ingestion or dataset-release status.
 
 For SLURM arrays, place the registry on persistent storage with reliable POSIX
-file locking that is visible from every compute node. Atomic reservations then
-prevent separate array tasks from encrypting the same content concurrently. If
-the shared filesystem does not support SQLite locking correctly, use
+file locking that is visible from every compute node. The registry enables WAL
+mode, uses a 60 second busy timeout and keeps writes short so separate array
+tasks can reserve and complete files without processing the same content twice.
+If the shared filesystem does not support SQLite locking correctly, use
 `--no-registry` for the array and perform duplicate control before generating
 the task plan.
 

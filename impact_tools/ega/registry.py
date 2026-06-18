@@ -52,10 +52,12 @@ class EgaRegistry:
     def __init__(self, path: Path) -> None:
         self.path = path.expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+        self.connection = sqlite3.connect(self.path, timeout=60)
         self.path.chmod(0o600)
         self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA busy_timeout=30000")
+        self.connection.execute("PRAGMA busy_timeout=60000")
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
         self.connection.execute(
             """
             CREATE TABLE IF NOT EXISTS encryptions (
