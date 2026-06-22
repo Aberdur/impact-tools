@@ -404,6 +404,8 @@ def _write_sbatch(
         str(output_dir),
         "--run-profile",
         config.run_profile,
+        "--pattern",
+        config.pattern,
     ]
     if config.crypt4gh_bin is not None:
         command.extend(["--crypt4gh-bin", str(config.crypt4gh_bin.expanduser().resolve())])
