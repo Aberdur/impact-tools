@@ -859,9 +859,10 @@ The registry confirms local encryption and completed SFTP transfer. It does not
 replace CEGA/LocalEGA accession, ingestion or dataset-release status.
 
 For SLURM arrays, place the registry on persistent storage with reliable POSIX
-file locking that is visible from every compute node. The registry enables WAL
-mode, uses a 60 second busy timeout and keeps writes short so separate array
-tasks can reserve and complete files without processing the same content twice.
+file locking that is visible from every compute node. The registry uses a
+60 second busy timeout, the SQLite rollback journal compatible with shared
+filesystems and short writes so separate array tasks can reserve and complete
+files without processing the same content twice.
 If the shared filesystem does not support SQLite locking correctly, use
 `--no-registry` for the array and perform duplicate control before generating
 the task plan.
