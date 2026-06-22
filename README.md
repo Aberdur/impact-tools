@@ -731,15 +731,33 @@ The generated execution bundle includes:
 | `encryption_slurm_files_<run_id>.tsv` | File-level mapping to each task. |
 | `encryption_slurm_chunks_<run_id>.txt` | Ordered chunk index used by the array script. |
 | `encrypt_localega_array_<run_id>.sbatch` | Reproducible SLURM array script. |
-| `_run_encrypt_localega_array_<run_id>.sh` | Small executable wrapper that submits the sbatch file. |
+| `report_localega_array_<run_id>.sbatch` | Dependent job that aggregates all task manifests. |
+| `aggregate_report/encryption_array_report_<job_id>.html` | Single visual report for the complete logical array run. |
+| `aggregate_report/encryption_array_manifest_<job_id>.json` | Machine-readable aggregate manifest for comparisons. |
+| `_run_encrypt_localega_array_<run_id>.sh` | Wrapper that submits the array and its `afterany` aggregate report job. |
 
-Submit the generated job with:
+Submit the generated array and automatic aggregate report job with:
 
 ```bash
 bash /path/to/plan/_run_encrypt_localega_array_<run_id>.sh
 ```
 
-Add `--submit` to submit the generated `sbatch` immediately from the CLI.
+The wrapper submits the report with an `afterany` dependency, so one logical
+SLURM run produces one aggregate HTML/TSV/JSON report even when individual
+tasks fail. Per-task reports remain available for diagnosis. Add `--submit` to
+submit both jobs immediately from the CLI.
+
+Runs split across more than one SLURM submission can be aggregated manually by
+repeating `--array-job-id`:
+
+```bash
+impact-tools ega aggregate-encryption-array \
+  --manifest-dir /path/to/encrypted \
+  --output-dir /path/to/aggregate-report \
+  --array-job-id 12345 \
+  --array-job-id 12346 \
+  --expected-tasks 6
+```
 
 Use `--task-layout file` if each file should become its own schedulable unit.
 Use `--setup-command` only when the generated job needs extra environment setup

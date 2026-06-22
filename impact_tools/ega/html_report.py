@@ -29,13 +29,16 @@ def write_encryption_report(
     run = payload["run"]
     summary = payload["summary"]
     records = payload.get("files", [])
+    array = payload.get("array")
     throughput = _throughput(
         summary["processed_input_bytes"],
         summary["total_encryption_seconds"],
     )
     context = _base_context(
         page_title="EGA encryption report",
-        report_title="Crypt4GH encryption run",
+        report_title=(
+            "Crypt4GH encryption array run" if array else "Crypt4GH encryption run"
+        ),
         badge=execution["profile"],
         summary_cards=[
             _card("Profile", execution["profile"], execution["hostname"]),
@@ -54,7 +57,19 @@ def write_encryption_report(
                 f"{summary['process']['max_rss_mib']:.1f}",
                 "MiB observed RSS",
             ),
-        ],
+        ]
+        + (
+            [
+                _card(
+                    "Array tasks",
+                    f"{array['task_manifests']}/{array['expected_tasks']}",
+                    "task manifests",
+                ),
+                _card("Missing tasks", array["missing_tasks"], "tasks"),
+            ]
+            if array
+            else []
+        ),
         performance_charts=(
             [
                 _chart(
@@ -90,6 +105,13 @@ def write_encryption_report(
                 ("System memory", _gib(execution.get("memory_bytes")) + " GiB"),
                 ("SLURM job", execution.get("slurm_job_id")),
                 ("SLURM array task", execution.get("slurm_array_task_id")),
+                (
+                    "SLURM array tasks",
+                    f"{array['task_manifests']}/{array['expected_tasks']}"
+                    if array
+                    else None,
+                ),
+                ("SLURM missing tasks", array.get("missing_tasks") if array else None),
                 ("SLURM partition", execution.get("slurm_partition")),
                 ("CPUs per task", execution.get("slurm_cpus_per_task")),
                 ("SLURM memory", execution.get("slurm_mem_per_node")),
