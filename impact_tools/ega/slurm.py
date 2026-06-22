@@ -75,6 +75,7 @@ class SlurmEncryptionPlanResult:
     file_plan_file: Path
     chunk_index_file: Path
     sbatch_file: Path
+    report_sbatch_file: Path
     run_file: Path
     task_count: int
     file_count: int
@@ -122,6 +123,7 @@ def write_slurm_encryption_plan(
     file_plan_file = plan_dir / f"encryption_slurm_files_{run_id}.tsv"
     chunk_index_file = plan_dir / f"encryption_slurm_chunks_{run_id}.txt"
     sbatch_file = plan_dir / f"encrypt_localega_array_{run_id}.sbatch"
+    report_sbatch_file = plan_dir / f"report_localega_array_{run_id}.sbatch"
     run_file = plan_dir / f"_run_encrypt_localega_array_{run_id}.sh"
 
     task_rows = []
@@ -174,12 +176,21 @@ def write_slurm_encryption_plan(
         logs_dir=logs_dir,
         task_count=len(tasks),
     )
-    _write_run_script(run_file, sbatch_file)
+    _write_report_sbatch(
+        report_sbatch_file=report_sbatch_file,
+        config=config,
+        manifest_dir=output_dir,
+        report_dir=plan_dir / "aggregate_report",
+        logs_dir=logs_dir,
+        task_count=len(tasks),
+    )
+    _write_run_script(run_file, sbatch_file, report_sbatch_file)
 
     LOGGER.info("SLURM task plan written to %s", task_plan_file)
     LOGGER.info("SLURM file plan written to %s", file_plan_file)
     LOGGER.info("SLURM chunk index written to %s", chunk_index_file)
     LOGGER.info("SLURM array script written to %s", sbatch_file)
+    LOGGER.info("SLURM aggregate report script written to %s", report_sbatch_file)
     LOGGER.info("SLURM run helper written to %s", run_file)
 
     return SlurmEncryptionPlanResult(
@@ -191,6 +202,7 @@ def write_slurm_encryption_plan(
         file_plan_file=file_plan_file,
         chunk_index_file=chunk_index_file,
         sbatch_file=sbatch_file,
+        report_sbatch_file=report_sbatch_file,
         run_file=run_file,
         task_count=len(tasks),
         file_count=len(files),
@@ -199,9 +211,9 @@ def write_slurm_encryption_plan(
 
 
 def submit_slurm_job(result: SlurmEncryptionPlanResult) -> SlurmEncryptionPlanResult:
-    """Submit the generated sbatch file and return the enriched result."""
+    """Submit the array and its dependent aggregate report job."""
     completed = subprocess.run(
-        ["sbatch", str(result.sbatch_file)],
+        ["bash", str(result.run_file)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -216,6 +228,7 @@ def submit_slurm_job(result: SlurmEncryptionPlanResult) -> SlurmEncryptionPlanRe
         file_plan_file=result.file_plan_file,
         chunk_index_file=result.chunk_index_file,
         sbatch_file=result.sbatch_file,
+        report_sbatch_file=result.report_sbatch_file,
         run_file=result.run_file,
         task_count=result.task_count,
         file_count=result.file_count,
@@ -464,12 +477,81 @@ def _write_sbatch(
     sbatch_file.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _write_run_script(run_file: Path, sbatch_file: Path) -> None:
+def _write_report_sbatch(
+    report_sbatch_file: Path,
+    config: SlurmEncryptionPlanConfig,
+    manifest_dir: Path,
+    report_dir: Path,
+    logs_dir: Path,
+    task_count: int,
+) -> None:
+    command_parts = [
+        "impact-tools",
+        "ega",
+        "aggregate-encryption-array",
+        "--manifest-dir",
+        str(manifest_dir),
+        "--output-dir",
+        str(report_dir),
+        "--array-job-id",
+        '"${IMPACT_ARRAY_JOB_ID}"',
+        "--expected-tasks",
+        str(task_count),
+    ]
+    command = " \\\n  ".join(
+        part if part == '"${IMPACT_ARRAY_JOB_ID}"' else shlex.quote(part)
+        for part in command_parts
+    )
+
+    lines = [
+        "#!/usr/bin/env bash",
+        f"#SBATCH --job-name={config.job_name}_report",
+        "#SBATCH --ntasks=1",
+        "#SBATCH --cpus-per-task=1",
+        "#SBATCH --mem=2G",
+        "#SBATCH --time=00:30:00",
+        f"#SBATCH --output={logs_dir}/report_%j.out",
+        f"#SBATCH --error={logs_dir}/report_%j.err",
+    ]
+    if config.partition is not None:
+        lines.append(f"#SBATCH --partition={config.partition}")
+    if config.account is not None:
+        lines.append(f"#SBATCH --account={config.account}")
+    if config.chdir is not None:
+        lines.append(f"#SBATCH --chdir={config.chdir.expanduser().resolve()}")
+    lines.extend(["", "set -euo pipefail", ""])
+    if config.setup_commands:
+        lines.append("# Environment setup")
+        lines.extend(config.setup_commands)
+        lines.append("")
+    lines.extend(
+        [
+            ': "${IMPACT_ARRAY_JOB_ID:?IMPACT_ARRAY_JOB_ID is required}"',
+            "",
+            command,
+            "",
+        ]
+    )
+    report_sbatch_file.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_run_script(
+    run_file: Path,
+    sbatch_file: Path,
+    report_sbatch_file: Path,
+) -> None:
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "",
-        f"sbatch {shlex.quote(str(sbatch_file))}",
+        f"ARRAY_SUBMISSION=$(sbatch --parsable {shlex.quote(str(sbatch_file))})",
+        'ARRAY_JOB_ID=${ARRAY_SUBMISSION%%;*}',
+        "REPORT_SUBMISSION=$(sbatch --parsable \"--dependency=afterany:${ARRAY_JOB_ID}\" "
+        "\"--export=ALL,IMPACT_ARRAY_JOB_ID=${ARRAY_JOB_ID}\" "
+        f"{shlex.quote(str(report_sbatch_file))})",
+        'REPORT_JOB_ID=${REPORT_SUBMISSION%%;*}',
+        'echo "Submitted encryption array job ${ARRAY_JOB_ID}"',
+        'echo "Submitted aggregate report job ${REPORT_JOB_ID} (afterany:${ARRAY_JOB_ID})"',
         "",
     ]
     run_file.write_text("\n".join(lines), encoding="utf-8")

@@ -29,6 +29,7 @@ from impact_tools.config import (
 from impact_tools.ega.benchmark import compare_runs
 from impact_tools.ega.encrypt import EncryptionConfig, run_encryption
 from impact_tools.ega.registry import DEFAULT_REGISTRY_PATH, EgaRegistry
+from impact_tools.ega.slurm_report import aggregate_slurm_encryption
 from impact_tools.ega.slurm import (
     SlurmEncryptionPlanConfig,
     submit_slurm_job,
@@ -807,6 +808,62 @@ def compare_runs_cmd(
     except Exception as exc:  # noqa: BLE001
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Compared runs: {result.runs}")
+    click.echo(f"Metrics: {result.metrics_file}")
+    click.echo(f"HTML report: {result.report_file}")
+
+
+@ega.command("aggregate-encryption-array")
+@click.option(
+    "--manifest-dir",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    help="Directory containing per-task encryption manifests.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Directory for the aggregate manifest, metrics and HTML report.",
+)
+@click.option(
+    "--array-job-id",
+    "array_job_ids",
+    multiple=True,
+    required=True,
+    help="SLURM array job identifier. Repeat when one logical run used several submissions.",
+)
+@click.option(
+    "--expected-tasks",
+    required=True,
+    type=click.IntRange(min=1),
+    help="Number of tasks expected in the array.",
+)
+@click.option("--no-charts", is_flag=True, help="Omit charts from the aggregate HTML report.")
+@click.pass_context
+def aggregate_encryption_array_cmd(
+    ctx: click.Context,
+    manifest_dir: Path,
+    output_dir: Path,
+    array_job_ids: tuple[str, ...],
+    expected_tasks: int,
+    no_charts: bool,
+) -> None:
+    """Aggregate one SLURM encryption array into a single logical run report."""
+    configure_module_logging(ctx, "ega_encrypt_slurm")
+    try:
+        result = aggregate_slurm_encryption(
+            manifest_dir=manifest_dir,
+            output_dir=output_dir,
+            array_job_ids=array_job_ids,
+            expected_tasks=expected_tasks,
+            include_charts=not no_charts,
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Array task manifests: {result.task_manifests}/{result.expected_tasks}")
+    click.echo(f"Files: {result.files}")
+    click.echo(f"Failed or missing: {result.failed}")
+    click.echo(f"Manifest: {result.manifest_file}")
     click.echo(f"Metrics: {result.metrics_file}")
     click.echo(f"HTML report: {result.report_file}")
 
@@ -2224,6 +2281,7 @@ def encrypt_slurm_cmd(
     click.echo(f"File plan      : {result.file_plan_file}")
     click.echo(f"Chunk index    : {result.chunk_index_file}")
     click.echo(f"SBATCH file    : {result.sbatch_file}")
+    click.echo(f"Report SBATCH  : {result.report_sbatch_file}")
     click.echo(f"Run helper     : {result.run_file}")
     if submit:
         if result.submitted:

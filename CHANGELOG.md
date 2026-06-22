@@ -18,6 +18,8 @@ where possible.
 - Added SLURM encryption execution support to generate chunk files, task
   manifests, reusable `sbatch` array scripts and optional job submission for
   large Affiliated EGA encryption batches.
+- Added automatic SLURM array aggregation with one logical HTML, TSV and JSON
+  report for the complete encryption run, while retaining per-task artifacts.
 - Added persistent user configuration through `~/.impact_tools/extra_config.json`
   for logs, EGA encryption, Inbox uploads and SLURM defaults.
 - Added Beacon dataset ingestion workflow through `impact-tools beacon ingest dataset`. [#8](https://github.com/BU-ISCIII/impact-tools/pull/8)
