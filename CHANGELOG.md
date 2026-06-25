@@ -18,18 +18,14 @@ where possible.
 - Added SLURM encryption execution support to generate chunk files, task
   manifests, reusable `sbatch` array scripts and optional job submission for
   large Affiliated EGA encryption batches.
-- Added automatic SLURM array aggregation with one logical HTML, TSV and JSON
-  report for the complete encryption run, while retaining per-task artifacts.
+- Added automatic SLURM array aggregation with one logical HTML, TSV and JSON report for the complete encryption run, while retaining per-task artifacts. [#15](https://github.com/BU-ISCIII/impact-tools/pull/8)
 - Added persistent user configuration through `~/.impact_tools/extra_config.json`
   for logs, EGA encryption, Inbox uploads and SLURM defaults.
 - Added Beacon dataset ingestion workflow through `impact-tools beacon ingest dataset`. [#8](https://github.com/BU-ISCIII/impact-tools/pull/8)
 - Added a persistent SHA-256 processing registry to avoid re-encrypting or
   resubmitting files that reappear in later batches or under different paths.
-- Added local, workstation and HPC execution profiles with host, process and
-  SLURM metrics for comparable EGA runs.
-- Added an end-to-end encryption and Inbox upload wrapper plus self-contained
-  HTML dashboards for individual runs and independent or combined WS/HPC
-  comparisons of encryption, upload and complete workflows.
+- Added local, workstation and HPC execution profiles with host, process and SLURM metrics for comparable EGA runs.[#15](https://github.com/BU-ISCIII/impact-tools/pull/8)
+- Added an end-to-end encryption and Inbox upload wrapper plus self-contained HTML dashboards for individual runs and independent or combined WS/HPC comparisons of encryption, upload and complete workflows. [#15](https://github.com/BU-ISCIII/impact-tools/pull/8)
 - Added Beacon variants ingestion workflow, metrics reports and some pgx run fixes [#11](https://github.com/BU-ISCIII/impact-tools/pull/11)
 - Replace SSH-based MongoDB operations with PyMongo and HTTP connections
 [#13](https://github.com/BU-ISCIII/impact-tools/pull/13)
