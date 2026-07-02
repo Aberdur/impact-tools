@@ -18,6 +18,7 @@ EXTRA_CONFIG_PATH = Path(
         Path.home() / ".impact_tools" / "extra_config.json",
     )
 ).expanduser()
+SUBMISSION_PROFILE_DIR = EXTRA_CONFIG_PATH.parent / "ega" / "submission_profiles"
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -142,6 +143,43 @@ def remove_extra_config(
     else:
         EXTRA_CONFIG_PATH.unlink()
     return True
+
+
+def user_submission_profile_path(profile_name: str) -> Path:
+    """Return the editable user path for an EGA submission profile."""
+    return SUBMISSION_PROFILE_DIR / f"{profile_name}.yaml"
+
+
+def install_submission_profile(
+    profile_name: str,
+    *,
+    source_file: Path | None = None,
+    force: bool = False,
+) -> Path:
+    """Install an editable EGA submission profile under ~/.impact_tools."""
+    destination = user_submission_profile_path(profile_name)
+    if destination.exists() and not force:
+        raise ValueError(
+            f"Submission profile already exists: {destination}. "
+            "Use --force to replace it."
+        )
+
+    if source_file is not None:
+        source_text = source_file.expanduser().read_text(encoding="utf-8")
+    else:
+        bundled_name = f"{profile_name}.yaml"
+        try:
+            bundled = resources.files("impact_tools.conf.ega.submission_profiles").joinpath(bundled_name)
+        except ModuleNotFoundError as exc:
+            raise FileNotFoundError(f"No bundled submission profiles found for {profile_name}") from exc
+        if not bundled.is_file():
+            raise FileNotFoundError(f"Bundled submission profile does not exist: {bundled_name}")
+        source_text = bundled.read_text(encoding="utf-8")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(source_text, encoding="utf-8")
+    destination.chmod(0o600)
+    return destination
 
 
 def _write_extra_config(configuration: dict[str, Any]) -> None:
