@@ -23,6 +23,7 @@ from impact_tools.config import (
     EXTRA_CONFIG_PATH,
     get_config_value,
     include_extra_config,
+    install_submission_profile,
     load_configuration,
     remove_extra_config,
 )
@@ -34,6 +35,12 @@ from impact_tools.ega.slurm import (
     SlurmEncryptionPlanConfig,
     submit_slurm_job,
     write_slurm_encryption_plan,
+)
+from impact_tools.ega.submission import (
+    PrepareSubmissionConfig,
+    SubmitSubmissionConfig,
+    prepare_submission,
+    submit_submission,
 )
 from impact_tools.ega.upload_inbox import InboxUploadConfig, run_inbox_upload
 from impact_tools.ega.workflow import EncryptUploadConfig, run_encrypt_upload
@@ -167,6 +174,14 @@ def cli(
     help="Replace or merge configuration sections that already exist.",
 )
 @click.option(
+    "--ega-submission-profile",
+    help="Install a bundled editable EGA submission profile under ~/.impact_tools.",
+)
+@click.option(
+    "--submission-profile-name",
+    help="Install --config-file as this editable EGA submission profile name.",
+)
+@click.option(
     "--remove-config",
     is_flag=True,
     help="Remove --config-name, or the complete file when used with --force.",
@@ -175,14 +190,16 @@ def add_extra_config_cmd(
     config_file: Path | None,
     config_name: str | None,
     force: bool,
+    ega_submission_profile: str | None,
+    submission_profile_name: str | None,
     remove_config: bool,
 ) -> None:
-    """Create or update ~/.impact_tools/extra_config.json."""
+    """Create/update extra config or install editable EGA submission profiles."""
     try:
         if remove_config:
-            if config_file is not None:
+            if config_file is not None or ega_submission_profile or submission_profile_name:
                 raise click.UsageError(
-                    "--config-file cannot be used together with --remove-config."
+                    "--remove-config cannot be combined with config/profile install options."
                 )
             removed = remove_extra_config(config_name, force=force)
             if not removed:
@@ -191,6 +208,28 @@ def add_extra_config_cmd(
                 )
             click.echo(f"Removed configuration from {EXTRA_CONFIG_PATH}")
             return
+
+        if ega_submission_profile:
+            if config_file is not None or submission_profile_name:
+                raise click.UsageError(
+                    "--ega-submission-profile cannot be combined with --config-file "
+                    "or --submission-profile-name."
+                )
+            path = install_submission_profile(ega_submission_profile, force=force)
+            click.echo(f"EGA submission profile written to {path}")
+            return
+
+        if submission_profile_name:
+            if config_file is None:
+                raise click.UsageError("--config-file is required with --submission-profile-name.")
+            path = install_submission_profile(
+                submission_profile_name,
+                source_file=config_file,
+                force=force,
+            )
+            click.echo(f"EGA submission profile written to {path}")
+            return
+
         if config_file is None:
             raise click.UsageError("--config-file is required.")
         path = include_extra_config(
@@ -206,6 +245,181 @@ def add_extra_config_cmd(
 @cli.group()
 def ega() -> None:
     """Tools for Affiliated EGA workflows."""
+
+
+@ega.command("prepare-submission")
+@click.option(
+    "--provider",
+    default="cnio",
+    show_default=True,
+    help="Provider extraction profile to use.",
+)
+@click.option(
+    "-i",
+    "--input-dir",
+    type=click.Path(path_type=Path, file_okay=False, exists=True),
+    required=True,
+    help="Directory containing provider delivery files for one sample.",
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Directory where draft submission and evidence files are written.",
+)
+@click.option(
+    "--sample-id",
+    help="Sample identifier. Defaults to the input directory name.",
+)
+@click.option(
+    "--metadata-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Optional provider/cohort metadata CSV, TSV or JSON file.",
+)
+@click.option(
+    "--profile-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Optional submission profile YAML/JSON file with official default values.",
+)
+@click.option(
+    "--include-examples",
+    is_flag=True,
+    help="Fill missing fields with EXAMPLE testing values from the submission profile.",
+)
+@click.pass_context
+def prepare_submission_cmd(
+    ctx: click.Context,
+    provider: str,
+    input_dir: Path,
+    output_dir: Path,
+    sample_id: str | None,
+    metadata_file: Path | None,
+    profile_file: Path | None,
+    include_examples: bool,
+) -> None:
+    """Prepare an EGA submitter-portal draft from local provider files."""
+    configure_module_logging(ctx, "ega_prepare_submission")
+    try:
+        result = prepare_submission(
+            PrepareSubmissionConfig(
+                provider=provider,
+                input_dir=input_dir,
+                output_dir=output_dir,
+                sample_id=sample_id,
+                metadata_file=metadata_file,
+                profile_file=profile_file,
+                include_examples=include_examples,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Evidence report: {result.evidence_file}")
+    click.echo(f"Evidence JSON: {result.evidence_json}")
+    click.echo(f"Draft submission: {result.draft_file}")
+    click.echo(f"Missing fields: {result.missing_file}")
+    click.echo(f"File inventory: {result.inventory_file}")
+
+
+@ega.command("submit-submission")
+@click.option(
+    "--draft-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="Prepared draft_submission.yaml/json file to submit.",
+)
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(path_type=Path, file_okay=False),
+    required=True,
+    help="Directory where payloads, responses and state are written.",
+)
+@click.option(
+    "--api-base",
+    help="Submitter Portal API base URL. Required with --execute.",
+)
+@click.option(
+    "--token",
+    help="Bearer access token. Prefer --token-file to avoid shell history.",
+)
+@click.option(
+    "--token-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="File containing a raw bearer token or JSON with access_token.",
+)
+@click.option(
+    "--resume-state-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    help="Previous submission_state.json to continue without recreating completed entities.",
+)
+@click.option(
+    "--submission-id",
+    help="Existing submission provisional_id to continue from instead of creating a new submission.",
+)
+@click.option(
+    "--execute/--dry-run",
+    default=False,
+    show_default=True,
+    help="Execute API calls. Default dry-run only writes payloads and plan.",
+)
+@click.option(
+    "--finalise/--no-finalise",
+    default=False,
+    show_default=True,
+    help="Include finalise step. Keep disabled until metadata has been reviewed.",
+)
+@click.option(
+    "--timeout-seconds",
+    default=60.0,
+    show_default=True,
+    type=float,
+    help="HTTP timeout in seconds for --execute.",
+)
+@click.option(
+    "--no-verify-tls",
+    is_flag=True,
+    help="Disable TLS certificate verification for --execute.",
+)
+@click.pass_context
+def submit_submission_cmd(
+    ctx: click.Context,
+    draft_file: Path,
+    output_dir: Path,
+    api_base: str | None,
+    token: str | None,
+    token_file: Path | None,
+    resume_state_file: Path | None,
+    submission_id: str | None,
+    execute: bool,
+    finalise: bool,
+    timeout_seconds: float,
+    no_verify_tls: bool,
+) -> None:
+    """Prepare payloads and optionally submit EGA metadata to the API."""
+    configure_module_logging(ctx, "ega_submit_submission")
+    try:
+        result = submit_submission(
+            SubmitSubmissionConfig(
+                draft_file=draft_file,
+                output_dir=output_dir,
+                api_base=api_base,
+                token=token,
+                token_file=token_file,
+                resume_state_file=resume_state_file,
+                submission_id=submission_id,
+                execute=execute,
+                finalise=finalise,
+                timeout_seconds=timeout_seconds,
+                verify_tls=not no_verify_tls,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Submission plan: {result.plan_file}")
+    click.echo(f"Payloads: {result.payload_dir}")
+    click.echo(f"Responses: {result.response_dir}")
+    click.echo(f"State: {result.state_file}")
 
 
 @ega.command("encrypt")

@@ -1,0 +1,114 @@
+# Go IMPaCT / CNIO submission preparation profile.
+# Empty values are intentionally left for cohort, sequencing centre or API-generated data.
+# Values under defaults are used only when no directly extracted technical evidence exists.
+
+defaults:
+  submission:
+    title:
+    description:
+    collaborators:
+  study:
+    title: Impact Cohort
+    description:
+    study_type: Whole Genome Sequencing
+    repositories:
+    pubmed_ids:
+    custom_tags:
+  sample:
+    subject_id:
+    biological_sex:
+    phenotype:
+    biosample_id:
+    description:
+    organism_part:
+  experiment:
+    design_description: WGS sequencing of sample
+    instrument_model_id:
+    library_source: GENOMIC
+    library_selection: RANDOM
+    library_construction_protocol:
+  dataset:
+    title:
+    description:
+    dataset_types:
+      - Whole genome sequencing
+    policy_accession_id:
+  finalise:
+    expected_release_date:
+    dataset_changelogs:
+
+extra_attributes:
+  study:
+    - project_code
+  sample:
+    - country_of_birth
+    - country_of_birth_mother
+    - country_of_birth_father
+    - karyotypicSex
+    - pedigrees
+    - treatments
+    - interventionsOrProcedures
+    - measurements
+    - collectionDate
+    - collectionMoment
+    - obtentionProcedure
+  experiment:
+    - analysis_pipeline
+    - analysis_pipeline_version
+    - reference_genome
+    - sequencing_run_ids
+    - flowcell_id
+  run:
+    - original_file_name
+    - index_file_name
+    - unencrypted_cram_md5
+    - unencrypted_crai_md5
+    - run_center
+    - mean_coverage
+    - mean_median_coverage
+    - percentage_20x_coverage
+    - percentage_based_quality_q20
+    - contamination_fraction
+  dataset:
+    - id
+    - createDateTime
+    - updateDateTime
+    - version
+    - cohortType
+    - inclusionCriteria
+    - exclusionCriteria
+    - cohortSize
+
+# Example values are documentation/scaffolding only. They are not applied as real
+# metadata defaults by prepare-submission and must be replaced before production.
+examples:
+  submission:
+    title: "EXAMPLE: Go IMPaCT WGS submission"
+    description: "EXAMPLE: Submission description to be replaced before production."
+  study:
+    description: "EXAMPLE: Study description to be replaced before production."
+    custom_tags:
+      - "EXAMPLE: Go_IMPaCT"
+  sample:
+    subject_id: "EXAMPLE: pseudonymised_subject_id"
+    biological_sex: "EXAMPLE: unknown"
+    phenotype: "EXAMPLE: normal"
+    organism_part: "EXAMPLE: blood"
+  experiment:
+    instrument_model_id: "EXAMPLE: 24"
+    library_construction_protocol: "EXAMPLE: Library preparation protocol/kit name."
+    sequencing_run_ids: "EXAMPLE: LH00248:106:23HTFCLT4; LH00248:107:23HTG5LT4"
+    flowcell_id: "EXAMPLE: 23HTFCLT4; 23HTG5LT4"
+  run:
+    run_center: "EXAMPLE: CNIO"
+  dataset:
+    title: "EXAMPLE: Go IMPaCT WGS dataset"
+    description: "EXAMPLE: Dataset description to be replaced before production."
+    policy_accession_id: "EXAMPLE: EGAP00000000000"
+    cohortType: "EXAMPLE: study-defined"
+    inclusionCriteria: "EXAMPLE: Inclusion criteria for this cohort/dataset."
+    exclusionCriteria: "EXAMPLE: Exclusion criteria for this cohort/dataset."
+  finalise:
+    expected_release_date: "EXAMPLE: 2030-01-01"
+    dataset_changelogs:
+      - "EXAMPLE: Initial dataset release."
