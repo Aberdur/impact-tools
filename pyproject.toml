@@ -37,3 +37,4 @@ zip-safe = false
 "impact_tools.beacon.resources" = ["Snakefile", "*.html", "*.css"]
 "impact_tools.ega.resources" = ["*.html", "*.css"]
 impact_tools = ["conf/*.json", "conf/*.yaml"]
+"impact_tools.conf.ega.submission_profiles" = ["*.yaml", "*.json"]
